@@ -60,11 +60,11 @@ Value globalPulseSpeed equals Global Pulse Speed setting (1 through 7).
 
 void LWZCALL LWZ_SBA(
 	LWZHANDLE hlwz, 
-	uint8_t bank0, 
-	uint8_t bank1,
-	uint8_t bank2,
-	uint8_t bank3,
-	uint8_t globalPulseSpeed);
+	unsigned int bank0, 
+	unsigned int bank1,
+	unsigned int bank2,
+	unsigned int bank3,
+	unsigned int globalPulseSpeed);
 
 
 /************************************************************************************************************************
@@ -93,7 +93,7 @@ You have to unregister if the library was manually loaded and then is going to b
 the window still exists.
 ************************************************************************************************************************/
 
-void LWZCALL LWZ_REGISTER(LWZHANDLE hlwz, void * hwnd);
+void LWZCALL LWZ_REGISTER(LWZHANDLE hlwz, HWND hwnd);
 
 
 /************************************************************************************************************************

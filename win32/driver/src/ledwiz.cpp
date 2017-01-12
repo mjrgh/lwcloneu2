@@ -30,7 +30,28 @@ extern "C" {
 #include "../include/ledwiz.h"
 #include "usbdev.h"
 
-#define USE_SEPERATE_IO_THREAD
+#define USE_SEPARATE_IO_THREAD
+#define DEBUG_LOGGING 0
+
+
+#if DEBUG_LOGGING
+#include <stdarg.h>
+#include <stdio.h>
+static void LOG(char *f, ...)
+{
+	va_list args;
+	va_start(args, f);
+	FILE *fp = fopen("LedWizDllDebug.log", "a");
+	if (fp != 0)
+	{
+		vfprintf(fp, f, args);
+		fclose(fp);
+	}
+	va_end(args);
+}
+#else
+#define LOG(x, ...)
+#endif
 
 
 const GUID HIDguid = { 0x4d1e55b2, 0xf16f, 0x11Cf, { 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
@@ -56,7 +77,7 @@ typedef struct
 	HANDLE hDevNotify;
 	WNDPROC WndProc;
 
-	#if defined(USE_SEPERATE_IO_THREAD)
+	#if defined(USE_SEPARATE_IO_THREAD)
 	HQUEUE hqueue;
 	#endif
 
@@ -69,7 +90,7 @@ typedef struct
 } lwz_context_t;
 
 // 'g_cs' protects our state if there is more than on thread in the process using the API.
-// Do not synchronize with other threads from within the callback routine because than it can deadlock!
+// Do not synchronize with other threads from within the callback routine because then it can deadlock!
 // Calling the API within the callback from the same thread is fine because the critical section does not block for that.
 CRITICAL_SECTION g_cs;
 
@@ -92,10 +113,17 @@ static void lwz_freelist(lwz_context_t *h);
 static void lwz_add(lwz_context_t *h, int indx);
 static void lwz_remove(lwz_context_t *h, int indx);
 
+enum packet_type_t
+{
+	PACKET_TYPE_PBA,
+	PACKET_TYPE_SBA,
+	PACKET_TYPE_RAW
+};
+
 static void queue_close(HQUEUE hqueue, bool unload);
 static HQUEUE queue_open(void);
-static size_t queue_push(HQUEUE hqueue, HUDEV hudev, uint8_t const *pdata, size_t ndata);
-static size_t queue_pop(HQUEUE hqueue, HUDEV *phudev, uint8_t *pbuffer, size_t nsize);
+static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t const *pdata, size_t ndata);
+static size_t queue_shift(HQUEUE hqueue, HUDEV *phudev, uint8_t *pbuffer, size_t nsize);
 static void queue_wait_empty(HQUEUE hqueue);
 
 
@@ -115,12 +143,15 @@ struct CAutoLockCS  // helper class to lock a critical section, and unlock it au
 
 void LWZ_SBA(
 	LWZHANDLE hlwz, 
-	BYTE bank0, 
-	BYTE bank1,
-	BYTE bank2,
-	BYTE bank3,
-	BYTE globalPulseSpeed)
+	unsigned int bank0, 
+	unsigned int bank1,
+	unsigned int bank2,
+	unsigned int bank3,
+	unsigned int globalPulseSpeed)
 {
+	LOG("SBA(unit=%d, {%02x,%02x,%02x,%02x}, speed=%d)\n",
+		hlwz, bank0, bank1, bank2, bank3, globalPulseSpeed);
+
 	AUTOLOCK(g_cs);
 
 	int indx = hlwz - 1;
@@ -141,9 +172,9 @@ void LWZ_SBA(
 	data[6] = 0;
 	data[7] = 0;
 
-	#if defined(USE_SEPERATE_IO_THREAD)
+	#if defined(USE_SEPARATE_IO_THREAD)
 
-	queue_push(g_plwz->hqueue, hudev, &data[0], 8);
+	queue_push(g_plwz->hqueue, hudev, PACKET_TYPE_SBA, &data[0], 8);
 
 	#else
 
@@ -155,6 +186,13 @@ void LWZ_SBA(
 
 void LWZ_PBA(LWZHANDLE hlwz, BYTE const *pbrightness_32bytes)
 {
+#if DEBUG_LOGGING
+	LOG("PBA(unit=%d, {", hlwz);
+	for (int i = 0 ; i < 32 ; ++i)
+		LOG("%s%d:%d", i == 0 ? "" : ", ", i, pbrightness_32bytes[i]);
+	LOG("})\n");
+#endif
+
 	AUTOLOCK(g_cs);
 
 	int indx = hlwz - 1;
@@ -168,9 +206,9 @@ void LWZ_PBA(LWZHANDLE hlwz, BYTE const *pbrightness_32bytes)
 		return;
 	}
 
-	#if defined(USE_SEPERATE_IO_THREAD)
+	#if defined(USE_SEPARATE_IO_THREAD)
 
-	queue_push(g_plwz->hqueue, hudev, pbrightness_32bytes, 32);
+	queue_push(g_plwz->hqueue, hudev, PACKET_TYPE_PBA, pbrightness_32bytes, 32);
 
 	#else
 
@@ -200,9 +238,9 @@ DWORD LWZ_RAWWRITE(LWZHANDLE hlwz, BYTE const *pdata, DWORD ndata)
 	int res = 0;
 	DWORD nbyteswritten = 0;
 
-	#if defined(USE_SEPERATE_IO_THREAD)
+	#if defined(USE_SEPARATE_IO_THREAD)
 
-	nbyteswritten = queue_push(g_plwz->hqueue, hudev, pdata, ndata);
+	nbyteswritten = queue_push(g_plwz->hqueue, hudev, PACKET_TYPE_RAW, pdata, ndata);
 
 	#else
 
@@ -231,20 +269,23 @@ DWORD LWZ_RAWREAD(LWZHANDLE hlwz, BYTE *pdata, DWORD ndata)
 		return 0;
 	}
 
-	#if defined(USE_SEPERATE_IO_THREAD)
+	#if defined(USE_SEPARATE_IO_THREAD)
 	queue_wait_empty(g_plwz->hqueue);
 	#endif
 
 	return usbdev_read(hudev, pdata, ndata);
 }
 
-void LWZ_REGISTER(LWZHANDLE hlwz, void * hwin)
+void LWZ_REGISTER(LWZHANDLE hlwz, HWND hwnd)
 {
+	LOG(hwnd == 0 ? "LWZ_REGISTER(%d, null)\n" : "LWZ_REGISTER(%d, %lx)\n",
+		hlwz, hwnd);
+
 	AUTOLOCK(g_cs);
 
 	int indx = hlwz - 1;
 
-	lwz_register(g_plwz, indx, (HWND)hwin);
+	lwz_register(g_plwz, indx, hwnd);
 }
 
 void LWZ_SET_NOTIFY_EX(LWZNOTIFYPROC_EX notify_ex_cb, void * puser, LWZDEVICELIST *plist)
@@ -267,14 +308,17 @@ void LWZ_SET_NOTIFY_EX(LWZNOTIFYPROC_EX notify_ex_cb, void * puser, LWZDEVICELIS
 
 void LWZ_SET_NOTIFY(LWZNOTIFYPROC notify_cb, LWZDEVICELIST *plist)
 {
+	LOG("LWZ_SET_NOTIFY(cb=%08lx, listp=%08lx)\n", notify_cb, plist);
+
 	AUTOLOCK(g_cs);
 
 	lwz_context_t * const h = g_plwz;
 
-	// clean up (if there was a LWZ_SET_NOTIFY before)
-
+	// Remove any previous list.  This will force a call to the
+	// callback for each device found on the new scan we'll do
+	// before returning.  If we didn't do this, the callback
+	// wouldn't be invoked for any device we already scanned.
 	lwz_freelist(h);
-	lwz_register(h, 0, NULL);
 
 	// set new list pointer and callbacks
 
@@ -303,6 +347,8 @@ BOOL WINAPI DllMain(
 {
 	if (fdwReason == DLL_PROCESS_ATTACH)
 	{
+		LOG("*****\n"
+			"LEDWIZ.DLL loading\n\n");
 		InitializeCriticalSection(&g_cs);
 
 		g_plwz = lwz_open(hinstDLL);
@@ -387,7 +433,7 @@ static lwz_context_t * lwz_open(HINSTANCE hinstDLL)
 
 	memset(h, 0x00, sizeof(*h));
 
-	#if defined(USE_SEPERATE_IO_THREAD)
+	#if defined(USE_SEPARATE_IO_THREAD)
 	h->hqueue = queue_open();
 
 	if (h->hqueue == NULL)
@@ -411,7 +457,7 @@ static void lwz_close(lwz_context_t *h)
 	lwz_freelist(h);
 	lwz_register(h, 0, NULL);
 
-	#if defined(USE_SEPERATE_IO_THREAD)
+	#if defined(USE_SEPARATE_IO_THREAD)
 	if (h->hqueue != NULL)
 	{
 		queue_close(h->hqueue, true);
@@ -521,30 +567,74 @@ static HUDEV lwz_get_hdev(lwz_context_t *h, int indx)
 static void lwz_notify_callback(lwz_context_t *h, int reason, LWZHANDLE hlwz)
 {
 	if (h->cb.notify)
+	{
+		LOG("NOTIFY(reason=%d (%s), unit=%d)\n",
+			reason,
+			reason == LWZ_REASON_ADD ? "Add" : reason == LWZ_REASON_DELETE ? "Delete" : "Unknown",
+			hlwz);
 		h->cb.notify(reason, hlwz);
+	}
 
 	if (h->cb.notify_ex)
 		h->cb.notify_ex(h->cb.puser, reason, hlwz);
 }
 
-static void lwz_add(lwz_context_t *h, int indx)
+// Add one or more new devices to the client's device list, and invoke
+// the client callback.
+//
+// For compatibility with some existing clients, it's necessary to add
+// ALL devices to the client's list before the FIRST notify callback.
+// The original LEDWIZ.DLL does this, and some clients depend on it.
+// E.g., LedBlinky apparently only pays attention to the first notify
+// callback, and ignores all subsequent invocations, so it only detects
+// devices that are in the list on the first call.  Ergo the list must
+// be populated with all devices before the first call.  This isn't
+// specified one way or the other in the API, but it would seem more
+// reasonable to me to populate the list incrementally, adding each
+// device just before calling the callback for that device.  This is
+// in fact what the original LWCloneU2 did, but that broke LedBlinky.
+// For full compatibility, we have to do things the same peculiar way
+// as the original DLL.
+static void lwz_add(lwz_context_t *h, int ndevices, const int *device_indices)
 {
-	LWZHANDLE hlwz = indx + 1;
 
-	// update user list (if one was provided)
-
+	// First, update the user list if one was provided.  We have to
+	// add all devices to the list before invoking the callback for
+	// any device.
 	if (h->plist)
 	{
-		if (h->plist->numdevices < LWZ_MAX_DEVICES)
+		for (int i = 0 ; i < ndevices ; ++i)
 		{
-			h->plist->handles[h->plist->numdevices] = hlwz;
-			h->plist->numdevices += 1;
+			// get the current unit number (== device index + 1)
+			LWZHANDLE hlwz = device_indices[i] + 1;
+
+			// check to see if it's already in the list
+			bool found = false;
+			for (int j = 0 ; j < h->plist->numdevices ; ++j)
+			{
+				if (h->plist->handles[j] == hlwz)
+				{
+					found = true;
+					break;
+				}
+			}
+
+			// if there's room, and it's not already in the list, add it
+			if (!found && h->plist->numdevices < LWZ_MAX_DEVICES)
+			{
+				h->plist->handles[h->plist->numdevices] = hlwz;
+				h->plist->numdevices += 1;
+				LOG("lwz_add(unit=%d, #devices=%d)\n", hlwz, h->plist->numdevices);
+			}
 		}
 	}
 
-	// notify callback
-
-	lwz_notify_callback(h, LWZ_REASON_ADD, hlwz);
+	// Now invoke the callback for each added device
+	for (int i = 0 ; i < ndevices ; ++i)
+	{
+		LWZHANDLE hlwz = device_indices[i] + 1;
+		lwz_notify_callback(h, LWZ_REASON_ADD, hlwz);
+	}
 }
 
 static void lwz_remove(lwz_context_t *h, int indx)
@@ -611,8 +701,13 @@ static void lwz_refreshlist_detached(lwz_context_t *h)
 
 static void lwz_refreshlist_attached(lwz_context_t *h)
 {
-	// check for new devices
+	LOG("Refreshing attached device list\n");
 
+	// no new devices found yet
+	int num_new_devices = 0;
+	int new_devices[LWZ_MAX_DEVICES];
+
+	// set up a search on all HID devices
 	HDEVINFO hDevInfo = SetupDiGetClassDevsA(
 		&HIDguid, 
 		NULL, 
@@ -623,14 +718,8 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 		return;
 
 	// go through all available devices and look for the proper VID/PID
-
-	int num_devices = 0;
-
-	for (DWORD dwindex = 0;; dwindex++)
+	for (DWORD dwindex = 0 ; ; dwindex++)
 	{
-		if (num_devices >= LWZ_MAX_DEVICES)
-			break;
-
 		SP_DEVICE_INTERFACE_DATA didat = {};
 		didat.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
 
@@ -677,6 +766,8 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 			// if this is the VID/PID we are interested in
 			// check some additional properties
 
+			LOG(". Found USB HID device, VID %04X, PID %04X\n", attrib.VendorID, attrib.ProductID);
+
 			int indx = (int)attrib.ProductID - (int)ProductID_LEDWiz_min;
 
 			if (bSuccess && 
@@ -685,27 +776,51 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 			{
 				PHIDP_PREPARSED_DATA p_prepdata = NULL;
 
+				LOG(".. vendor/product code matches LedWiz, checking HID descriptors\n", indx+1);
 				if (HidD_GetPreparsedData(usbdev_handle(device_tmp.hudev), &p_prepdata) == TRUE)
 				{
-					HIDP_CAPS caps = {};
+					LOG(".. retrieved preparsed data OK\n");
 
+					HIDP_CAPS caps = {};
 					if (HIDP_STATUS_SUCCESS == HidP_GetCaps(p_prepdata, &caps))
 					{
+						LOG(".. retrieved HID capabilities: "
+							" link collection nodes %d, output report length %d\n",
+							caps.NumberLinkCollectionNodes, caps.OutputReportByteLength);
+						
 						// LED-wiz has an interface with a eight byte report 
 						// (report-id is zero and is not transmitted, but counts here
 						// for the total length)
-
 						if (caps.NumberLinkCollectionNodes == 1 &&
 							caps.OutputReportByteLength == 9)
 						{
+							LOG(".. this is an LedWiz - adding device\n");
+
+							// if it's a Pinscape unit, we don't need a write delay
+							wchar_t prodstr[256];
+							if (HidD_GetProductString(usbdev_handle(device_tmp.hudev), prodstr, 256)
+								&& wcsstr(prodstr, L"Pinscape Controller") != 0)
+							{
+								LOG(".. Pinscape Controller identified\n");
+								usbdev_set_min_write_interval(device_tmp.hudev, 0);
+							}
+
+							// if this slot isn't populated yet, add the device
 							if (h->devices[indx].hudev == NULL)
 							{
 								memcpy(&h->devices[indx], &device_tmp, sizeof(device_tmp));
 								device_tmp.hudev = NULL;
 
-								lwz_add(h, indx);
+								LOG(".. device added successfully, %d devices total\n", num_new_devices);
 
-								num_devices++;
+								// add it to our list of new devices found on this search
+								if (num_new_devices < LWZ_MAX_DEVICES)
+									new_devices[num_new_devices++] = indx;
+
+							}
+							else
+							{
+								LOG(".. unit slot already in use; device not added\n");
 							}
 						}
 					}
@@ -726,6 +841,9 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 	{
 		SetupDiDestroyDeviceInfoList(hDevInfo);
 	}
+
+	// add all of the newly found devices
+	lwz_add(h, num_new_devices, new_devices);
 }
 
 static void lwz_freelist(lwz_context_t *h)
@@ -745,11 +863,12 @@ static void lwz_freelist(lwz_context_t *h)
 
 typedef struct {
 	HUDEV hudev;
+	packet_type_t typ;
 	size_t ndata;
 	uint8_t data[32];
 } chunk_t;
 
-#define QUEUE_LENGTH   64   // the maximum bandwidth of the device is around 2 kByte/s so a lenght of 64 corresponds to one second
+#define QUEUE_LENGTH   64   // the maximum bandwidth of the device is around 2 kByte/s so a length of 64 corresponds to one second
 
 typedef struct {
 	int rpos;
@@ -778,7 +897,7 @@ static DWORD WINAPI QueueThreadProc(LPVOID lpParameter)
 		uint8_t buffer[64];
 
 		HUDEV hudev = NULL;
-		size_t ndata = queue_pop(h, &hudev, &buffer[0], sizeof(buffer));
+		size_t ndata = queue_shift(h, &hudev, &buffer[0], sizeof(buffer));
 
 		// exit thread if required
 
@@ -805,7 +924,9 @@ static void queue_close(HQUEUE hqueue, bool unload)
 
 	if (h->hthread)
 	{
-		queue_push(h, NULL, NULL, 0);
+		// Add a magic "quit" item to the queue, identified by null device
+		// and data pointers.  The thread quits when it reads this item.
+		queue_push(h, NULL, PACKET_TYPE_RAW, NULL, 0);
 
 		if (unload)
 		{
@@ -913,7 +1034,7 @@ static void queue_wait_empty(HQUEUE hqueue)
 	}
 }
 
-static size_t queue_push(HQUEUE hqueue, HUDEV hudev, uint8_t const *pdata, size_t ndata)
+static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t const *pdata, size_t ndata)
 {
 	queue_t * const h = (queue_t*)hqueue;
 
@@ -941,8 +1062,90 @@ static size_t queue_push(HQUEUE hqueue, HUDEV hudev, uint8_t const *pdata, size_
 			}
 
 			int const nfree = QUEUE_LENGTH - h->level;
+			bool combined = false;
 
-			if (nfree <= 0)
+			// If this is a PBA message, overwrite any PBA message already in
+			// the queue with the new message rather than adding the new one
+			// as a separate message.  A PBA overwrites all brightness levels,
+			// so a newer message always supersedes a previous one.  If there's
+			// one in the queue, it means that we haven't even tried sending
+			// the last one to the device yet, so commands are coming faster
+			// than the device can accept them.  It's better to apply the
+			// latest update in this case than to apply all of the intermediate
+			// updates getting here.  This makes fades less smooth, but it's
+			// much better to have the real-time device state match the client
+			// state so that effects aren't delayed from what's going on in the
+			// game.
+			if (typ == PACKET_TYPE_PBA)
+			{
+				for (int i = 0, pos = h->rpos ; i < h->level ;
+					 ++i, pos = (pos + 1) % QUEUE_LENGTH)
+				{
+					chunk_t *chunk = &h->buf[pos];
+					if (chunk->hudev == hudev)
+					{
+						if (chunk->typ == PACKET_TYPE_PBA)
+						{
+							memcpy(chunk->data, pdata, ndata);
+							combined = true;
+							break;
+						}
+					}
+				}
+			}
+
+			// If this is an SBA message, we can overwrite the last SBA in
+			// the queue, but only if there's no PBA following it in the queue.
+			// As with PBA, an SBA message sets all outputs, so each SBA message
+			// effectively wipes out all traces of past SBA messages.  Further,
+			// SBA and PBA messages are orthogonal, so the final state is always
+			// the combination of the last SBA plus the last PBA so far, and isn't
+			// affected by the order of execution of the final SBA and PBA.
+			//
+			// However, SBA and PBA have a subtle interaction that can be visible
+			// to users.  An SBA that turns a port ON does so at the port's last
+			// brightness setting.  Some clients (e.g., DOF) therefore are careful
+			// to set the brightness for a port that's to be newly turned on
+			// *before* turning the switch on - i.e., they send a PBA before
+			// the SBA.  But the client might also have already sent an earlier
+			// SBA that we haven't processed yet.  To handle this case correctly,
+			// we need to make sure that we only overwrite an SBA if there are
+			// no PBA messages later in the queue.
+			if (typ == PACKET_TYPE_SBA)
+			{
+				// search for the last queued SBA not followed by a PBA
+				int last_sba_pos = -1;
+				for (int i = 0, pos = h->rpos ; i < h->level ;
+					 ++i, pos = (pos + 1) % QUEUE_LENGTH)
+				{
+					// If this is an SBA, note it as the last one so far.  If
+					// it's a PBA, forget any previous SBA, since we don't want
+					// to overwrite an SBA followed by a PBA.
+					chunk_t *chunk = &h->buf[pos];
+					if (chunk->hudev == hudev)
+					{
+						if (chunk->typ == PACKET_TYPE_SBA)
+							last_sba_pos = pos;
+						if (chunk->typ == PACKET_TYPE_PBA)
+							last_sba_pos = -1;
+					}
+				}
+
+				// if we found a suitable queued SBA, replace it
+				if (last_sba_pos >= 0)
+				{
+					chunk_t *chunk = &h->buf[last_sba_pos];
+					memcpy(chunk->data, pdata, ndata);
+					combined = true;
+				}
+			}
+
+			if (combined)
+			{
+				// we combined this message with a prior message, so
+				// there's no need to write it separately - we're done
+			}
+			else if (nfree <= 0)
 			{
 				h->wblocked = true;
 				do_wait = true;
@@ -957,17 +1160,13 @@ static size_t queue_push(HQUEUE hqueue, HUDEV hudev, uint8_t const *pdata, size_
 
 				pc->hudev = hudev;
 				pc->ndata = ndata;
+				pc->typ = typ;
 
 				if (pdata != NULL) {
 					memcpy(&pc->data[0], pdata, ndata);
 				}
 
-				h->wpos += 1;
-
-				if (h->wpos >= QUEUE_LENGTH) {
-					h->wpos -= QUEUE_LENGTH;
-				}
-
+				h->wpos = (h->wpos + 1) % QUEUE_LENGTH;
 				h->level += 1;
 
 				h->wblocked = false;
@@ -991,7 +1190,7 @@ static size_t queue_push(HQUEUE hqueue, HUDEV hudev, uint8_t const *pdata, size_
 	}
 }
 
-static size_t queue_pop(HQUEUE hqueue, HUDEV *phudev, uint8_t *pbuffer, size_t nsize)
+static size_t queue_shift(HQUEUE hqueue, HUDEV *phudev, uint8_t *pbuffer, size_t nsize)
 {
 	queue_t * const h = (queue_t*)hqueue;
 
@@ -1041,12 +1240,7 @@ static size_t queue_pop(HQUEUE hqueue, HUDEV *phudev, uint8_t *pbuffer, size_t n
 
 				nread = pc->ndata;
 
-				h->rpos += 1;
-
-				if (h->rpos >= QUEUE_LENGTH) {
-					h->rpos -= QUEUE_LENGTH;
-				}
-
+				h->rpos = (h->rpos + 1) % QUEUE_LENGTH;
 				h->level -= 1;
 
 
