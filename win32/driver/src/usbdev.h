@@ -24,6 +24,7 @@ HUDEV usbdev_create(LPCSTR devicepath);
 void usbdev_addref(HUDEV hudev);
 void usbdev_release(HUDEV hudev);
 size_t usbdev_read(HUDEV hudev, void *pdata, size_t ndata);
+void usbdev_clear_input(HUDEV hudev, size_t input_report_len);
 size_t usbdev_write(HUDEV hudev, void const *pdata, size_t ndata);
 HANDLE usbdev_handle(HUDEV hudev);
 void usbdev_set_min_write_interval(HUDEV hudev, unsigned int interval_ms);

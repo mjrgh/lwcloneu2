@@ -1,0 +1,46 @@
+html {
+    min-height: 100%;    /* make document at least as tall as viewport */
+    position: relative;
+    padding: 0px;
+    margin: 0px;
+}
+body {
+    height: 100%;        /* make body element match height of html element */
+    background: #ffffff;
+    color: #000000;
+    font: 9pt/11pt Verdana;
+    margin: 0px;
+    padding: 16px;
+}
+
+body > div {
+}
+
+div {
+    margin: 1em 0px;
+}
+
+h1, h2, h3 {
+}
+
+h1 img, h2 img, h3 img {
+    vertical-align: middle;
+}
+
+h1 {
+    padding: 1em 16px;
+    margin: 0px -16px;
+    font: bold 12pt/14pt Verdana;
+    margin-top: -16px;
+    margin-bottom: 2em;
+    border-bottom: 1px solid #0000ff;
+}
+
+h2 {
+    font: bold 10pt/12pt Verdana;
+}
+
+h3 {
+    font: bold 9pt/11p Verdana
+}
+

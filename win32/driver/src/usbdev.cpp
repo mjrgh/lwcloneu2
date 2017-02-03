@@ -23,8 +23,9 @@
 
 static void usbdev_close_internal(HUDEV hudev);
 
-// maximum wait time for reading, in milliseconds
+// maximum wait time for reading/writing, in milliseconds
 #define USB_READ_TIMEOUT_MS             500
+#define USB_WRITE_TIMEOUT_MS            500
 
 // minimum interval between consecutive writes for a real LedWiz unit, in milliseconds
 #define LEDWIZ_MIN_WRITE_INTERVAL_MS    5
@@ -238,7 +239,7 @@ size_t usbdev_read(HUDEV hudev, void *psrc, size_t ndata)
 	OVERLAPPED ol = {};
 	ol.hEvent = h->hrevent;
 
-	bres = ReadFile(h->hdev, buffer, sizeof(buffer), NULL, &ol);
+	bres = ReadFile(h->hdev, buffer, ndata + 1, NULL, &ol);
 
 	if (bres != TRUE)
 	{
@@ -281,6 +282,49 @@ size_t usbdev_read(HUDEV hudev, void *psrc, size_t ndata)
 	memcpy(pdata, &buffer[1], ndata);
 
 	return ndata;
+}
+
+// Clear pending input.  This reads and discards input from the device
+// as long as we have buffered input, then returns.  This can be used
+// to discard unwanted joystick status reports when preparing to send
+// a control request.
+void usbdev_clear_input(HUDEV hudev, size_t input_rpt_len)
+{
+	usbdev_context_t * const h = (usbdev_context_t*)hudev;
+	AUTOLOCK(h->cslock);
+	for (int i = 0 ; i < 64 ; ++i)
+	{
+		// make sure the requested length is within range
+		BYTE buffer[65];
+		if (input_rpt_len > sizeof(buffer))
+			input_rpt_len = sizeof(buffer);
+
+		// start a non-blocking read
+		OVERLAPPED ol = {};
+		ol.hEvent = h->hrevent;
+		if (ReadFile(h->hdev, buffer, input_rpt_len, NULL, &ol))
+		{
+			// success - get the result to complete the I/O, then keep
+			// going, since the point is to clear buffered input
+			DWORD nread;
+			GetOverlappedResult(h->hdev, &ol, &nread, TRUE);
+		}
+		else
+		{
+			// The read failed.  If the result is "pending", it means that
+			// the read was successfully initiated but that there's nothing
+			// available to satisfy the read immediately, hence the buffer
+			// is empty.  That's what we're after, so failure == success in
+			// this case.  Cancel the pending read, since we didn't actually
+			// want the data, we just wanted to know that there were no data.
+			DWORD dwerror = GetLastError();
+			if (dwerror == ERROR_IO_PENDING)
+				CancelIo(h->hdev);
+
+			// stop looping - consider the buffer emptied
+			break;
+		}
+	}
 }
 
 size_t usbdev_write(HUDEV hudev, void const *pdst, size_t ndata)
@@ -330,44 +374,39 @@ size_t usbdev_write(HUDEV hudev, void const *pdst, size_t ndata)
 
 		// write the bytes
 		BOOL bres = WriteFile(h->hdev, buf, nwrite, NULL, &ol);
-
-		if (bres != TRUE)
+		if (!bres)
 		{
 			DWORD dwerror = GetLastError();
-
 			if (dwerror == ERROR_IO_PENDING)
 			{
-				if (WaitForSingleObject(h->hwevent, USB_READ_TIMEOUT_MS) != WAIT_OBJECT_0)
+				bres = TRUE;
+				if (WaitForSingleObject(h->hwevent, USB_WRITE_TIMEOUT_MS) != WAIT_OBJECT_0)
 				{
+					bres = FALSE;
 					CancelIo(h->hdev);
 				}
-
-				bres = TRUE;
 			}
 		}
 
-		if (bres == TRUE)
-		{
-			bres = GetOverlappedResult(
-				h->hdev,
-				&ol,
-				&nwritten,
-				TRUE);
-		}
+		// if the write completed, get the result
+		if (bres)
+			bres = GetOverlappedResult(h->hdev,	&ol, &nwritten, TRUE);
 
 		// update the last write time
 		h->last_write_ticks = GetTickCount();
 
-		if (bres != TRUE)
+		// note any failure in debug builds
+		if (!bres)
 		{
 			DWORD dwerror = GetLastError();
 			_ASSERT(0);
 		}
 
-		if (nwritten != nwrite || bres != TRUE) {
+		// if the write failed, or didn't send the expected number of bytes, stop
+		if (nwritten != nwrite || !bres)
 			break;
-		}
 
+		// success - count the bytes written and continue with anything still pending
 		nbyteswritten += ncopy;
 	}
 
