@@ -30,7 +30,7 @@ namespace NewLedTester
 
         private void HelpWindow_Load(object sender, EventArgs e)
         {
-            webBrowser1.Navigate("file:///" + Path.Combine(Program.programDir, "Help.htm"));
+            webBrowser1.Navigate("file:///" + Path.Combine(Program.programDir, "NewLedTesterHelp.htm"));
             singleton = this;
         }
 
