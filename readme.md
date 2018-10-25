@@ -17,8 +17,8 @@ simple plug-and-play replacement for the manufacturer's DLL.
 
 Why would you want to replace the manufacturer's DLL?  Several reasons:
 
-* The manufacturer's DLL is closed-source; this version is open-source.
-You can see what it's doing and fix any problems yourself if necessary.
+* This version is open-source.  The manufacturer's is proprietary
+closed-source.
 
 * This version is multi-threaded.  USB I/O is done on a background
 thread so that it never stalls the calling program.  The original
@@ -75,7 +75,8 @@ represent the additional ports.  The virtual LedWiz units are numbered
 consecutively after the actual unit number assigned to the Pinscape
 device.  For example, if a Pinscape device is assigned to LedWiz unit
 #8, and has 64 ports, it will appear to software as units #8 and #9.
-Unit #9 represents the physical ports from 33 to 64.
+Unit #9 represents the physical ports from 33 to 64.  This is
+completely automatic; no configuration is needed to make this happen.
 
 * **ZB Output Control support.** This version recognizes ZB Output
 Control devices (zebsboards.com), which use a different USB Vendor ID
@@ -108,7 +109,7 @@ for MAME.
 
 The LWCloneU2 project contains a compatible driver DLL "ledwiz.dll"
 replacement that fixes some bugs of the original one and does not
-block your main application, i.e. the I/O is fully asynchron.
+block your main application, i.e. the I/O is fully asynchronous.
 
 
 Supported Hardware
@@ -137,3 +138,4 @@ Building the Windows DLL
 
 There are project files for Visualstudio 2008 Express and Visualstudio
 2012 Express. The VS 2012 solution supports creating a 64 bit DLL.
+[Correction: The build has been updated to VS 2017 -mjr, Oct 2018]
