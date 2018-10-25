@@ -59,6 +59,7 @@ static void LOG(char *f, ...)
 const GUID HIDguid = { 0x4d1e55b2, 0xf16f, 0x11Cf, { 0x88, 0xcb, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30 } };
 
 USHORT const VendorID_LEDWiz       = 0xFAFA;
+USHORT const VendorID_Zebs         = 0x20A0;
 USHORT const ProductID_LEDWiz_min  = 0x00F0;
 USHORT const ProductID_LEDWiz_max  = ProductID_LEDWiz_min + LWZ_MAX_DEVICES - 1;
 
@@ -1071,7 +1072,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 			// equivalent to (ProductID & 0x000F) + 1.
 			int indx = (int)attrib.ProductID - (int)ProductID_LEDWiz_min;
 			if (bSuccess && 
-			    attrib.VendorID == VendorID_LEDWiz &&
+			    (attrib.VendorID == VendorID_LEDWiz || attrib.VendorID == VendorID_Zebs) &&
 			    indx >= 0 && indx < LWZ_MAX_DEVICES)
 			{
 				// It's an LedWiz, according to the VID/PID
@@ -1115,7 +1116,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 							&& caps.OutputReportByteLength == 9
 							&& !(caps.UsagePage == 1 && caps.Usage == 6)) // USB keyboard = page 1/usage 6
 						{
-							LOG(".. this is an LedWiz - adding device\n");
+							LOG(".. link collection node count, report length, and USB usage match LedWiz\n");
 
 							// presume it's a real LedWiz or some clone/emulation we don't
 							// handle specially
@@ -1129,6 +1130,32 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 							// presume it has the standard LedWiz complement of 32 ports
 							device_tmp.num_outputs = 32;
 							device_tmp.supports_sbx_pbx = false;
+
+							// If it's using the zebsboard VID, make sure the manufacturer ID looks right
+							if (attrib.VendorID == VendorID_Zebs)
+							{
+								// get the manufacturer ID string, in lower-case, for further testing
+								wchar_t manustr[256] = { 0 };
+								HidD_GetManufacturerString(usbdev_handle(device_tmp.hudev), manustr, 256);
+								_wcslwr_s(manustr);
+
+								if (wcsstr(manustr, L"zebsboards") != NULL)
+								{
+									// mark it as a zeb's output control device
+									LOG(".. ZB Output Control detected\n");
+									device_tmp.device_type = LWZ_DEVICE_TYPE_ZB;
+
+									// this device doesn't need USB delays
+									usbdev_set_min_write_interval(device_tmp.hudev, 0);
+								}
+								else
+								{
+									// it's not a Zebsboards unit, so it must not be an LedWiz
+									// emulator after all
+									LOG(".. Device uses VID 0x20A0, but manufacturer string doesn't contain 'zebsboards' - rejecting\n");
+									device_tmp.device_type = LWZ_DEVICE_TYPE_NONE;
+								}
+							}
 
 							// get the product ID string, so that we can further identify
 							// whether the device is a real LedWiz or one of the specific
@@ -1205,7 +1232,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 									}
 								}
 								else if (wcslen(prodstr) >= 9
-										 && memcmp(prodstr, L"LWCloneU2", 2*sizeof(wchar_t)) == 0)
+										 && memcmp(prodstr, L"LWCloneU2", 9*sizeof(wchar_t)) == 0)
 								{
 									// It's an LWCloneU2 unit
 									LOG(".. LWCloneU2 identified\n");
@@ -1216,36 +1243,43 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 								}
 							}
 
-							// If this slot contains a Pinscape virtual LedWiz interface,
-							// remove the virtual device so that we can use the slot for
-							// the real device.  Real devices always override virtual ones.
-							if (h->devices[indx].device_type == LWZ_DEVICE_TYPE_PINSCAPE_VIRT)
+							// if we decided to keep this device, add it
+							if (device_tmp.device_type != LWZ_DEVICE_TYPE_NONE)
 							{
-								// remove the virtual interface and notify the user callback
-								h->devices[indx].device_type = LWZ_DEVICE_TYPE_NONE;
-								lwz_remove(h, indx);
-							}
+								LOG(".. attempting to add device\n");
 
-							// if this slot isn't populated yet, add the device
-							if (h->devices[indx].hudev == NULL)
-							{
-								// copy the temp device struct to the active device list entry
-								memcpy(&h->devices[indx], &device_tmp, sizeof(device_tmp));
+								// If this slot contains a Pinscape virtual LedWiz interface,
+								// remove the virtual device so that we can use the slot for
+								// the real device.  Real devices always override virtual ones.
+								if (h->devices[indx].device_type == LWZ_DEVICE_TYPE_PINSCAPE_VIRT)
+								{
+									// remove the virtual interface and notify the user callback
+									LOG(".. this slot has a Pinscape virtual LedWiz; this real device overrides that\n");
+									h->devices[indx].device_type = LWZ_DEVICE_TYPE_NONE;
+									lwz_remove(h, indx);
+								}
 
-								// the device list entry now owns the file handle, so forget it
-								// in the temp struct
-								device_tmp.hudev = NULL;
+								// if this slot isn't populated yet, add the device
+								if (h->devices[indx].hudev == NULL)
+								{
+									// copy the temp device struct to the active device list entry
+									memcpy(&h->devices[indx], &device_tmp, sizeof(device_tmp));
 
-								LOG(".. device added successfully, %d devices total\n", num_new_devices);
+									// the device list entry now owns the file handle, so forget it
+									// in the temp struct
+									device_tmp.hudev = NULL;
 
-								// add it to our list of new devices found on this search
-								if (num_new_devices < LWZ_MAX_DEVICES)
-									new_devices[num_new_devices++] = indx;
+									LOG(".. device added successfully, %d devices total\n", num_new_devices);
 
-							}
-							else
-							{
-								LOG(".. unit slot already in use; device not added\n");
+									// add it to our list of new devices found on this search
+									if (num_new_devices < LWZ_MAX_DEVICES)
+										new_devices[num_new_devices++] = indx;
+
+								}
+								else
+								{
+									LOG(".. unit slot already in use; device not added\n");
+								}
 							}
 						}
 					}

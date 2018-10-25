@@ -15,13 +15,20 @@ namespace NewLedTester
         [STAThread]
         static void Main()
         {
-            programDir = AppDomain.CurrentDomain.BaseDirectory;
+            try
+            {
+                programDir = AppDomain.CurrentDomain.BaseDirectory;
 
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new Form1());
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new Form1());
 
-            Application.Exit();
+                Application.Exit();
+            }
+            catch (Exception exc)
+            {
+                MessageBox.Show(exc.Message);
+            }
         }
 
         public static String programDir;

@@ -48,11 +48,14 @@ namespace NewLedTester
 
         private void Load()
         {
-            hModule = LoadLibrary(@"ledwiz.dll");
+            hModule = LoadLibrary(@".\ledwiz.dll");
             if (hModule == IntPtr.Zero)
+            {
+
                 throw new Exception(
-                    "Unable to load LEDWIZ.DLL.  Please check that LEDWIZ.DLL is in "
-                    + "the same folder with NewLedTester.");
+                    "Unable to load LEDWIZ.DLL (Windows error " 
+                    + Marshal.GetLastWin32Error() + ")");
+            }
 
             LWZ_SBA = (_LWZ_SBA)procAddr("LWZ_SBA", typeof(_LWZ_SBA));
             LWZ_PBA = (_LWZ_PBA)procAddr("LWZ_PBA", typeof(_LWZ_PBA));

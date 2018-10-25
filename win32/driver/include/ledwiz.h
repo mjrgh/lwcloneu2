@@ -108,6 +108,7 @@ typedef struct {
 #define LWZ_DEVICE_TYPE_LWCLONEU2      2     // LwCloneU2
 #define LWZ_DEVICE_TYPE_PINSCAPE       3     // Pinscape Controller
 #define LWZ_DEVICE_TYPE_PINSCAPE_VIRT  4     // Pinscape Controller virtual LedWiz for extended ports
+#define LWZ_DEVICE_TYPE_ZB             5     // ZB Output Control (zebsboards.com)
 
 // Device description - used in LWZ_GET_DEVICE_INFO
 typedef struct {
