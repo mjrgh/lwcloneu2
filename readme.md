@@ -32,9 +32,11 @@ The new DLL is compatible with real LedWiz hardware, as well as some
 alternative output controllers designed for visual pinball cabinets,
 specifically the Pinscape Controller and Zebsboards.com ZB Output
 Control.  It's actually *better* at controlling real LedWiz hardware
-than the manufacturer's DLL, because this version has a workaround for
+than the manufacturer's DLL, because it has a workaround for
 a serious firmware bug in the LedWiz hardware that can cause erratic
-behavior with the original manufacturer's DLL.
+behavior with the original manufacturer's DLL, plus it has threaded
+USB I/O that doesn't stall the calling program while USB commands
+are being sent.
 
 Summary of changes vs the original cithraidt version:
 
