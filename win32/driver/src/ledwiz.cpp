@@ -1093,8 +1093,10 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 							" link collection nodes %d, output report length %d\n",
 							caps.NumberLinkCollectionNodes, caps.OutputReportByteLength);
 						
-						// The LedWiz command interface has an eight byte output report,
-						// and the link collection is structured with a single node.
+						// Apply heuristic filters:
+						//
+						// 1. Output report byte length
+						// The LedWiz command interface has an eight byte output report.
 						// Note that the Windows HID drivers always include a one-byte
 						// "report ID" prefix in reports read or written through the
 						// driver.  The LedWiz itself doesn't transmit the prefix byte
@@ -1106,14 +1108,36 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 						// HID also normalizes the report length seen in the HID caps,
 						// so the byte length we're looking for is 9.
 						//
-						// Checking the link collection count and report length let us
-						// distinguish interfaces in LedWiz clone devices that can present
-						// multiple HID interfaces, such as the LwCloneU2 or the Pinscape
-						// Controller.  To further ensure that we don't mistake a Pinscape
-						// keyboard interface for an LedWiz command interface, filter out
-						// anything that indicates it's a keyboard via the HID usage.
-						if (caps.NumberLinkCollectionNodes == 1
-							&& caps.OutputReportByteLength == 9
+						// 2. USB Usage
+						// Test that this is NOT a keyboard interface (USB usage page 
+						// 1, usage 6).  The Pinscape controller presents a keyboard
+						// interface in addition its joystick interface, which looks
+						// to the HID scan like a completely separate device.  We want
+						// to skip that virtual device since it doesn't accept LedWiz 
+						// output reports.  (Note that it would filter out more false
+						// positivies if we "ruled in" specific HID usages rather than
+						// only "ruling out" the keyboard, but that would also be less
+						// flexible at recognizing future product updates from GGG and
+						// future clones and emulators.  In practice, false positives
+						// from random third-party devices don't actually seem to
+						// happen, so on balance it seems much better to err on the
+						// side of filtering in unknown devices that pass our other
+						// tests.)
+						//
+						// 3. Link collection count (REMOVED)
+						// In the past, we also checked the link collection count to
+						// make sure caps.NumberLinkCollectionNodes == 1.  This was a
+						// further ad hoc check that the original LedWiz device and
+						// LWCloneU2 devices both passed, and which the Pinscape device
+						// deliberately passed because it was known that LWCloneU2 did
+						// this test.  However, this test is now too restrictive in 
+						// that a newer real LedWiz product, the LedWiz+GP, fails the
+						// test.  So I'm removing the link collection node test.  That
+						// test was purely speculative anyway: as far as I know, there
+						// are no actual false positives that it filtered out, so it
+						// was just there *in case* something came along that spoofed
+						// an LedWiz as far as all of the other tests go.
+						if (caps.OutputReportByteLength == 9
 							&& !(caps.UsagePage == 1 && caps.Usage == 6)) // USB keyboard = page 1/usage 6
 						{
 							LOG(".. link collection node count, report length, and USB usage match LedWiz\n");
