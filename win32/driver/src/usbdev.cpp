@@ -239,7 +239,7 @@ size_t usbdev_read(HUDEV hudev, void *psrc, size_t ndata)
 	OVERLAPPED ol = {};
 	ol.hEvent = h->hrevent;
 
-	bres = ReadFile(h->hdev, buffer, ndata + 1, NULL, &ol);
+	bres = ReadFile(h->hdev, buffer, static_cast<DWORD>(ndata + 1), NULL, &ol);
 
 	if (bres != TRUE)
 	{
@@ -302,7 +302,7 @@ void usbdev_clear_input(HUDEV hudev, size_t input_rpt_len)
 		// start a non-blocking read
 		OVERLAPPED ol = {};
 		ol.hEvent = h->hrevent;
-		if (ReadFile(h->hdev, buffer, input_rpt_len, NULL, &ol))
+		if (ReadFile(h->hdev, buffer, static_cast<DWORD>(input_rpt_len), NULL, &ol))
 		{
 			// success - get the result to complete the I/O, then keep
 			// going, since the point is to clear buffered input
@@ -345,7 +345,7 @@ size_t usbdev_write(HUDEV hudev, void const *pdst, size_t ndata)
 	AUTOLOCK(h->cslock);
 
 	int res = 0;
-	DWORD nbyteswritten = 0;
+	size_t nbyteswritten = 0;
 
 	BYTE buf[9]; 
 	buf[0] = 0; // report id
@@ -353,7 +353,7 @@ size_t usbdev_write(HUDEV hudev, void const *pdst, size_t ndata)
 	// write the data in 8-byte chunks
 	while (ndata > 0)
 	{
-		int const ncopy = (ndata > 8) ? 8 : ndata;
+		size_t const ncopy = (ndata > 8) ? 8 : ndata;
 
 		memset(&buf[1], 0x00, 8);
 		memcpy(&buf[1], pdata, ncopy);

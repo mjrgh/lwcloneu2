@@ -431,7 +431,7 @@ DWORD LWZ_RAWWRITE(LWZHANDLE hlwz, BYTE const *pdata, DWORD ndata)
 
 	#if defined(USE_SEPARATE_IO_THREAD)
 
-	nbyteswritten = queue_push(g_plwz->hqueue, hudev, PACKET_TYPE_RAW, pdata, ndata);
+	nbyteswritten = static_cast<DWORD>(queue_push(g_plwz->hqueue, hudev, PACKET_TYPE_RAW, pdata, ndata));
 
 	#else
 
@@ -464,7 +464,7 @@ DWORD LWZ_RAWREAD(LWZHANDLE hlwz, BYTE *pdata, DWORD ndata)
 	queue_wait_empty(g_plwz->hqueue);
 	#endif
 
-	return usbdev_read(hudev, pdata, ndata);
+	return static_cast<DWORD>(usbdev_read(hudev, pdata, ndata));
 }
 
 void LWZ_REGISTER(LWZHANDLE hlwz, HWND hwnd)

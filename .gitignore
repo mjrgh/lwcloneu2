@@ -1,0 +1,8 @@
+*.vcxproj.user
+**/.vs/**
+win32/**/bin/**
+win32/**/obj/**
+win32/*/build/vs_*/Win32/**
+win32/*/build/vs_*/x64/**
+
+

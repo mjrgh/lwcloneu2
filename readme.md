@@ -1,5 +1,4 @@
-An LedWiz.dll replacement DLL based on LWCloneU2
-================================================
+# An LedWiz.dll replacement DLL based on LWCloneU2
 
 This is a forked version of LWCloneU2 by cithraidt, with improvements
 to that project's ledwiz.dll replacement specifically designed for
@@ -20,12 +19,24 @@ Why would you want to replace the manufacturer's DLL?  Several reasons:
 * This version is open-source.  The manufacturer's is proprietary
 closed-source.
 
-* This version is multi-threaded.  USB I/O is done on a background
-thread so that it never stalls the calling program.  The original
-manufacturer's DLL makes the calling program wait for USB I/O to
-complete, which can cause video stutter in games like Future Pinball.
+* Multi-threading.  This DLL does its USB I/O on a background
+thread, so that it never stalls the calling program waiting for
+the USB transaction to complete.  The original manufacturer's DLL
+uses blocking I/O, which forces the calling program to wait for
+every USB write to complete.  This can cause video stutter and
+UI lag in games like Future Pinball, and it can even stall the
+game for seconds at a time during intense bursts of feedback
+device effect activity, such as when a multiball mode or other
+event triggers a big light show in the game.  This version of the
+DLL never blocks the main thread with USB I/O, allowing the game 
+to run smoothly even when heavy USB activity is going on.
 
-* This version has some pin cab-related improvements and bug fixes (see below).
+* Better reliability.  This version works around a bug in the original 
+LedWiz hardware that causes genuine LedWiz's to glitch when multiple USB 
+updates are sent too rapidly.  It also fixes some bugs in the original
+manufacturer's DLL (or, more accurately, never had the bugs in the
+first place) that make the original DLL crash with some software or
+when some other types of devices are present in the system.
 
 
 The new DLL is compatible with real LedWiz hardware, as well as some
@@ -89,13 +100,18 @@ Windows GUI program that lets you see attached LedWiz units and
 turn the output ports on and off manually.  This can be helpful
 when testing a new setup.
 
+## Building
 
-**Building:** The Visual Studio project for building the DLL has been
-updated to VS 2017.
+The build was migrated in October 2024 to Visual Studio 2022.  Please
+use VS 2022, and load the solution file **win32/LWCloneU2_vs2022.sln**.
+Select Build > Build Solution from the main menu to build the DLL and
+a small test program.
+
+The win32/NewLedTester tree contains its own C# VS solution to build
+that program separately.
 
 
-Original Readme
-===============
+# Original Readme
 
 **LWCloneU2**
 
