@@ -1517,6 +1517,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 						d.device_type = LWZ_DEVICE_TYPE_PINSCAPE_PICO;
 						d.ps_info.base_unit = pico.ledWizUnitNum - 1;
 						d.ps_info.first_port_num = basePortNum;
+						d.num_outputs = lastPortNum - basePortNum + 1;
 
 						// store the interface pointer
 						d.psPico = fci;
