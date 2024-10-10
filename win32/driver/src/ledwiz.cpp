@@ -1497,6 +1497,14 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 					continue;
 				}
 
+				// On connection, it's courteous to send a time-of-day update to
+				// the device, to sync it with the local wall-clock time in case
+				// it's been rebooted recently.  The Pico keeps track of time as
+				// long as it's running, but it doesn't have a battery-backed
+				// RTC on board, so it loses track of the wall-clock time on
+				// every reset.
+				fci->SendClockTime(100);
+
 				// synthesize a name for the virtual devices
 				char baseName[128];
 				_snprintf_s(baseName, _TRUNCATE, "Pinscape Pico #%d (%s)", pico.unitNum, pico.unitName.c_str());
