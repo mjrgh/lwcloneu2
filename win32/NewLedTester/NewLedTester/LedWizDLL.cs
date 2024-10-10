@@ -48,7 +48,7 @@ namespace NewLedTester
 
         private void Load()
         {
-            hModule = LoadLibrary(sizeof(int) == 4 ? @".\ledwiz.dll" : @".\ledwiz64.dll");
+            hModule = LoadLibrary(IntPtr.Size == 4 ? @".\ledwiz.dll" : @".\ledwiz64.dll");
             if (hModule == IntPtr.Zero)
             {
 

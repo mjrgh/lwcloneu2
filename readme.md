@@ -63,18 +63,23 @@ source, and the people who wrote it aren't going to fix it.  This
 version of the DLL emulates some of that ad hoc behavior more
 precisely and so is more widely compatible with buggy client software.
 
-* **LedWiz hardware bug workarounds.** The real LedWiz has a serious
+* **LedWiz hardware bug workaround.** The real LedWiz has a serious
 bug in its firmware related to USB message timing that makes it behave
-erratically when the PC sends USB commands too quickly.  (This *isn't*
-an inherent USB timing limitation or a Windows driver issue, as many
-people believe.  It's purely a bug in the LedWiz firmware.  Other
-devices, such as Pinscape, ZB Output Control, and LWCloneU2-based
-devices, don't suffer from the problem.)  This version of the DLL
-works around this timing bug in the LedWiz hardware by throttling
-the command rate to ensure a minimum 10ms interval between commands.
-The throttling is *only* used when real LedWiz hardware is detected;
-when other devices are recognized, commands are sent as quickly as
-the client software generates them.
+erratically when the PC sends USB commands too quickly.  When DOF first
+became available, a lot of virtual pin cab users noticed that DOF
+frequently made their LedWiz fire outputs at random.  This was long
+believed to be due to some inherent USB timing limitation, or a bug 
+in the Windows USB driver, but after much investigation, it was
+definitively traced to a bug in the LedWiz itself, most likely in
+its firmware.  When the LedWiz receives a new command too quickly
+after a prior one, the new command partially overwrites the old 
+command in the LedWiz's internal memory, causing random port state
+changes due to the corrupted memory.  To work around the bug, this 
+version of the DLL automatically detects when it's talking to a genuine 
+LedWiz, and automatically throttles USB traffic to that device to one 
+command per 10ms.  The throttling *isn't* applied to clones, since none
+of the clones suffer from the bug.  So the DLL gives you the best of both:
+the real LedWiz won't glitch with this DLL, and other devices run at full speed.
 
 * **Pinscape Controller support.** The original manufacturer's DLL
 crashes when a Pinscape devices is attached with its keyboard input

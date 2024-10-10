@@ -34,7 +34,11 @@ It also offers some improvements and extended functionality:
 	creates for the keyboard from the control interface.
 
   - New "raw" I/O functions allow LwCloneU2-aware clients to access extended
-    functionality in that device.
+    functionality in that device using its extended protocol.
+
+  - Pinscape Pico devices are supported as virtual LedWiz units.  If a Pico has
+    more than 32 logical output ports, it appears as multiple virtual LedWiz's,
+	(one for every 32 Pico ports).
 
 The exported API is backward-compatible with the original LEDWIZ.DLL interface.
 Functions marked with [EXTENDED API] in the comments below are added functions
@@ -85,7 +89,8 @@ extern "C" {
 #define LWZ_MAX_DEVICES 16
 
 // Notification callback 'reason' codes
-typedef enum {
+typedef enum LWZ_NOTIFY_REASON
+{
 	LWZ_REASON_ADD     = 1,   // device was added (used on initial discovery and when a new device is plugged in)
 	LWZ_REASON_DELETE  = 2    // device was removed (used when an existing device is unplugged)
 } LWZ_NOTIFY_REASON;
@@ -97,7 +102,8 @@ typedef int32_t LWZHANDLE;
 // Caller-allocated device list.  The DLL hangs onto this structure and can
 // make changes to it when processing Windows messages.  The DLL invokes the
 // notification callback after making any changes.
-typedef struct {
+typedef struct LWZDEVICELIST 
+{
 	LWZHANDLE handles[LWZ_MAX_DEVICES];
 	int32_t numdevices;
 } LWZDEVICELIST;
@@ -107,11 +113,13 @@ typedef struct {
 #define LWZ_DEVICE_TYPE_LEDWIZ         1     // LedWiz or unknown emulator
 #define LWZ_DEVICE_TYPE_LWCLONEU2      2     // LwCloneU2
 #define LWZ_DEVICE_TYPE_PINSCAPE       3     // Pinscape Controller
-#define LWZ_DEVICE_TYPE_PINSCAPE_VIRT  4     // Pinscape Controller virtual LedWiz for extended ports
+#define LWZ_DEVICE_TYPE_PINSCAPE_VIRT  4     // Pinscape Controller virtual LedWiz for ports beyond 32
 #define LWZ_DEVICE_TYPE_ZB             5     // ZB Output Control (zebsboards.com)
+#define LWZ_DEVICE_TYPE_PINSCAPE_PICO  6     // Pinscape Pico virtual LedWiz
 
 // Device description - used in LWZ_GET_DEVICE_INFO
-typedef struct {
+typedef struct LWZDEVICEINFO 
+{
 	DWORD cbSize;			// structure size
 	DWORD dwDevType;        // device type (LWZ_DEVICE_TYPE_xxx constant)
 	char szName[256];		// device name, from USB device descriptor
@@ -121,7 +129,7 @@ typedef struct {
 /************************************************************************************************************************
 LWZ_SBA - All Outputs State plus Global Pulse Speed
 *************************************************************************************************************************
-handle is an idetifier for a specific LED-WIZ device
+handle is an identifier for a specific LED-WIZ device
 Values bank0, bank1, bank2, and bank3 equal 8-bit representations of on/off states for banks 1-4. 
 Value globalPulseSpeed equals Global Pulse Speed setting (1 through 7).
 ************************************************************************************************************************/
@@ -138,14 +146,14 @@ void LWZCALL LWZ_SBA(
 /************************************************************************************************************************
 LWZ_PBA - All Outputs Profile Settings (Most Efficient): 
 *************************************************************************************************************************
-handle is an idetifier for a specific LED-WIZ device
+handle is an identifier for a specific LED-WIZ device
 Each of the 32 parameters coincide with outputs 1-32. A value of 1 to 48 sets the brightness of each LED using PWM. 
 A value of 129-132 indicates an automated pulse mode as follows:
 129 = Ramp Up / Ramp Down
 130 = On / Off
 131 = On / Ramp Down
 132 = Ramp Up / On
-The speed is contolled by the Global Pulse Speed parameter.
+The speed is controlled by the Global Pulse Speed parameter.
 ************************************************************************************************************************/
 
 void LWZCALL LWZ_PBA(LWZHANDLE hlwz, uint8_t const *pmode32bytes);
@@ -165,7 +173,7 @@ void LWZCALL LWZ_REGISTER(LWZHANDLE hlwz, HWND hwnd);
 
 
 /************************************************************************************************************************
-LWZ_SET_NOTIFY - Set notifcation mechanisms for plug/unplug events
+LWZ_SET_NOTIFY - Set notification mechanisms for plug/unplug events
 LWZ_SET_NOTIFY_EX - same as LWZ_SET_NOTIFY, but provides a user defined pointer in the callback [EXTENDED API]
 *************************************************************************************************************************
 Set a notification callback for plug/unplug events. 
@@ -177,8 +185,8 @@ will be updated with any new device handles that are required.
 This function is also used to set a pointer to your applications device list. 
 ************************************************************************************************************************/
 
-typedef void (LWZCALLBACK * LWZNOTIFYPROC)(int32_t reason, LWZHANDLE hlwz);
-typedef void (LWZCALLBACK * LWZNOTIFYPROC_EX)(void *puser, int32_t reason, LWZHANDLE hlwz);
+typedef void (LWZCALLBACK *LWZNOTIFYPROC)(int32_t reason, LWZHANDLE hlwz);
+typedef void (LWZCALLBACK *LWZNOTIFYPROC_EX)(void *puser, int32_t reason, LWZHANDLE hlwz);
 
 void LWZCALL LWZ_SET_NOTIFY(LWZNOTIFYPROC notify_callback, LWZDEVICELIST *plist);
 void LWZCALL LWZ_SET_NOTIFY_EX(LWZNOTIFYPROC_EX notify_ex_callback, void *puser, LWZDEVICELIST *plist);
@@ -209,7 +217,7 @@ uint32_t LWZ_RAWWRITE(LWZHANDLE hlwz, uint8_t const *pdata, uint32_t ndata);
 /************************************************************************************************************************
 LWZ_RAWREAD - read raw data from the device [EXTENDED API]
 *************************************************************************************************************************
-return number of bytes read.
+return number of bytes read.  Note that this might be greater than ndata, but no more than ndata bytes will be copied.
 ************************************************************************************************************************/
 
 uint32_t LWZ_RAWREAD(LWZHANDLE hlwz, uint8_t *pdata, uint32_t ndata);

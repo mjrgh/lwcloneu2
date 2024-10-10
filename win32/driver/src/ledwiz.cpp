@@ -17,10 +17,18 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <memory>
+#include <regex>
 
 #include <windows.h>
 #include <crtdbg.h>
 #include <Setupapi.h>
+#include <Shlwapi.h>
+
+#include "PinscapePico/WinAPI/FeedbackControllerInterface.h"
+
+#pragma comment(lib, "PinscapePicoAPI")
 
 extern "C" {
 #include <Hidsdi.h>
@@ -33,26 +41,11 @@ extern "C" {
 #include "usbdev.h"
 
 #define USE_SEPARATE_IO_THREAD
-#define DEBUG_LOGGING 0
 
-
-#if DEBUG_LOGGING
-#include <stdarg.h>
-#include <stdio.h>
-static void LOG(char *f, ...)
-{
-	va_list args;
-	va_start(args, f);
-	FILE *fp = fopen("LedWizDllDebug.log", "a");
-	if (fp != 0)
-	{
-		vfprintf(fp, f, args);
-		fclose(fp);
-	}
-	va_end(args);
-}
+#ifdef USE_SEPARATE_IO_THREAD
+#define IF_SEPARATE_IO_THREAD(x) x
 #else
-#define LOG(x, ...)
+#define IF_SEPARATE_IO_THREAD(x)
 #endif
 
 
@@ -63,76 +56,99 @@ USHORT const VendorID_Zebs         = 0x20A0;
 USHORT const ProductID_LEDWiz_min  = 0x00F0;
 USHORT const ProductID_LEDWiz_max  = ProductID_LEDWiz_min + LWZ_MAX_DEVICES - 1;
 
-static const char * lwz_process_sync_mutex_name = "lwz_process_sync_mutex";
-
-
-// Pinscape Virtual LedWiz.  For each Pinscape unit with more than
-// 32 outputs, we'll set up one virtual LedWiz interface per block
-// of additional 32 outputs.  The virtual units are given LedWiz
-// unit numbers consecutively after the actual Pinscape unit's ID.
-// For example, if a Pinscape unit is on LedWiz unit 3, and it has
-// 96 outputs, we'll create a virtual LedWiz unit 4 that addresses
-// outputs 33-64, and a virtual unit 5 for outputs 65-96.  The
-// virtual units are created only if they don't conflict with real
-// physical units connected to the system.
-typedef struct {
-	int base_unit;   // index of the base Pinscape unit in the devices[] array
-} ps_virtual_lwz_t;
-
-typedef struct {
+// Device control struct
+struct lwz_device_t
+{
 	// handle to USB device
-	HUDEV hudev;
+	HUDEV hudev = NULL;
 
 	// detected device type
-	UINT device_type;
+	UINT device_type = LWZ_DEVICE_TYPE_NONE;
 
 	// input report (device to host) length
-	UINT input_rpt_len;
+	UINT input_rpt_len = 0;
 
 	// Number of outputs on the physical unit.  This is always 32 for real
-	// LedWiz units and most clones.  Pinscape units can have up to 128
-	// outputs.
-	int num_outputs;
+	// LedWiz units and most clones.  Pinscape (KL25Z) units can have up to 128
+	// outputs, and Pinscape Pico units can have up to 255.
+	int num_outputs = 0;
 
 	// Does this device support the Pinscape SBX/PBX extensions?
-	BOOL supports_sbx_pbx;
+	bool supports_sbx_pbx = false;
 
 	// If this is a Pinscape Virtual LedWiz interface, this contains 
 	// information on the underlying physical Pinscape unit and which
 	// subset of the physical ports we address.  This isn't used for
-	// entires corresponding to physical units (including Pincsape units).
-	ps_virtual_lwz_t ps_virtual_lwz;
+	// entires corresponding to physical units (including Pinscape units).
+	struct pinscape_info_t
+	{
+		// index of the base Pinscape unit in the devices[] array
+		int base_unit = 0;
+
+		// First port number on underlying device
+		int first_port_num = 0;
+	};
+	pinscape_info_t ps_info;
 
 	// Device name, from the USB HID descriptor
-	char device_name[256];
+	char device_name[256]{ 0 };
 
 	// USB HID descriptor data; we save this because it contains the file
 	// system path for the device, which we might need to re-open the
 	// file handle after a device change event
-	DWORD dat[256];
-} lwz_device_t;
+	std::vector<BYTE> diDetail;
+
+	// Pinscape Pico device, if applicable
+	std::shared_ptr<PinscapePico::FeedbackControllerInterface> psPico;
+};
 
 typedef void * HQUEUE;
 
-typedef struct
+// logging levels
+#define LOGLEVEL_NONE    0
+#define LOGLEVEL_NORMAL  1
+#define LOGLEVEL_DEBUG   2
+
+struct lwz_context_t
 {
+	~lwz_context_t() { }
+
+	// DLL instance handle
+	HINSTANCE hInstance = NULL;
+
+	// log file handle
+	FILE *fpLog = nullptr;
+
+	// logging level (LOGLEVEL_xxx value)
+	int logLevel = LOGLEVEL_NONE;
+
+	// internal device list
 	lwz_device_t devices[LWZ_MAX_DEVICES];
-	LWZDEVICELIST *plist;
-	HWND hwnd;
-	HANDLE hDevNotify;
-	WNDPROC WndProc;
 
-	#if defined(USE_SEPARATE_IO_THREAD)
-	HQUEUE hqueue;
-	#endif
+	// client device list
+	LWZDEVICELIST *plist = nullptr;
 
-	struct {
-		void * puser;
-		LWZNOTIFYPROC notify;
-		LWZNOTIFYPROC_EX notify_ex;
+	// client window handle, for notifications
+	HWND hwnd = NULL;
+
+	// original client window procedure, for restoration on exit
+	// (to remove our subclass handler)
+	WNDPROC WndProc = NULL;
+
+	// device-change notification handle
+	HANDLE hDevNotify = NULL;
+
+	// asynchronous I/O queue, when using threaded I/O
+	IF_SEPARATE_IO_THREAD(HQUEUE hqueue = nullptr);
+
+	// client notify callbacks
+	struct Callbacks
+	{
+		void *puser = nullptr;			// user callback context
+		LWZNOTIFYPROC notify;			// notify callback
+		LWZNOTIFYPROC_EX notify_ex;		// extended notify callback
 	} cb;
-
-} lwz_context_t;
+};
 
 // 'g_cs' protects our state if there is more than on thread in the process using the API.
 // Do not synchronize with other threads from within the callback routine because then it can deadlock!
@@ -149,7 +165,7 @@ static lwz_context_t * lwz_open(HINSTANCE hinstDLL);
 static void lwz_close(lwz_context_t *h);
 
 static void lwz_register(lwz_context_t *h, int indx_user, HWND hwnd);
-static HUDEV lwz_get_hdev(lwz_context_t *h, int indx_user);
+static bool lwz_get_hdev(lwz_context_t *h, int indx_user, HUDEV &huDev, std::shared_ptr<PinscapePico::FeedbackControllerInterface> &psPico);
 static void lwz_notify_callback(lwz_context_t *h, int reason, LWZHANDLE hlwz);
 
 static void lwz_refreshlist_attached(lwz_context_t *h);
@@ -160,17 +176,22 @@ static void lwz_remove(lwz_context_t *h, int indx);
 
 enum packet_type_t
 {
+	PACKET_TYPE_NONE,       // No data
 	PACKET_TYPE_SBA,		// Original LedWiz SBA
 	PACKET_TYPE_PBA,		// Original LedWiz PBA
 	PACKET_TYPE_RAW,		// raw format (for LwCloneU2 control messages)	
 	PACKET_TYPE_SBX,		// Pinscape SBX (extended SBA, for ports beyond 32)
-	PACKET_TYPE_PBX 		// Pinscape PBX (extended PBA, for ports beyond 32)
+	PACKET_TYPE_PBX, 		// Pinscape PBX (extended PBA, for ports beyond 32)
 };
 
 static void queue_close(HQUEUE hqueue, bool unload);
 static HQUEUE queue_open(void);
-static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t const *pdata, size_t ndata);
-static size_t queue_shift(HQUEUE hqueue, HUDEV *phudev, uint8_t *pbuffer, size_t nsize);
+static size_t queue_push(HQUEUE hqueue, 
+	HUDEV hudev, std::shared_ptr<PinscapePico::FeedbackControllerInterface> *fci, int starting_port_num,
+	packet_type_t typ, uint8_t const *pdata, size_t ndata);
+static size_t queue_shift(HQUEUE hqueue, packet_type_t &packet_type,
+	HUDEV *phudev, std::shared_ptr<PinscapePico::FeedbackControllerInterface> &fci,
+	int &starting_port_num, uint8_t *pbuffer, size_t nsize);
 static void queue_wait_empty(HQUEUE hqueue);
 
 
@@ -185,18 +206,31 @@ struct CAutoLockCS  // helper class to lock a critical section, and unlock it au
 
 
 //**********************************************************************************************************************
+// Logging
+//
+static void LOG(int level, char *f, ...)
+{
+	if (g_plwz != nullptr && g_plwz->fpLog != nullptr && g_plwz->logLevel >= level)
+	{
+		va_list args;
+		va_start(args, f);
+		vfprintf(g_plwz->fpLog, f, args);
+		va_end(args);
+
+		fflush(g_plwz->fpLog);
+	}
+}
+
+
+//**********************************************************************************************************************
 // Top Level API functions
 //**********************************************************************************************************************
 
-void LWZ_SBA(
-	LWZHANDLE hlwz, 
-	unsigned int bank0, 
-	unsigned int bank1,
-	unsigned int bank2,
-	unsigned int bank3,
+void LWZ_SBA(LWZHANDLE hlwz, 
+	unsigned int bank0, unsigned int bank1, unsigned int bank2, unsigned int bank3,
 	unsigned int globalPulseSpeed)
 {
-	LOG("SBA(unit=%d, {%02x,%02x,%02x,%02x}, speed=%d)\n",
+	LOG(LOGLEVEL_DEBUG, "SBA(unit=%d, {%02x,%02x,%02x,%02x}, speed=%d)\n",
 		hlwz, bank0, bank1, bank2, bank3, globalPulseSpeed);
 
 	AUTOLOCK(g_cs);
@@ -212,13 +246,14 @@ void LWZ_SBA(
 	BYTE cmd = 64;
 	int port_group = 0;
 	packet_type_t packet_type = PACKET_TYPE_SBA;
+	int startingPortNum = 0;
 
 	// check to see if this is addressed to a Pinscape virtual LedWiz
-	lwz_device_t *pdev = &g_plwz->devices[indx];
-	if (pdev->device_type == LWZ_DEVICE_TYPE_PINSCAPE_VIRT)
+	lwz_device_t *pDev = &g_plwz->devices[indx];
+	if (pDev->device_type == LWZ_DEVICE_TYPE_PINSCAPE_VIRT)
 	{
 		// get the real Pinscape reference information
-		ps_virtual_lwz_t *ps = &g_plwz->devices[indx].ps_virtual_lwz;
+		auto *ps = &g_plwz->devices[indx].ps_info;
 
 		// Figure the port group.
 		// The port group tells the Pinscape unit which group of 32
@@ -242,10 +277,17 @@ void LWZ_SBA(
 		cmd = 67;
 		packet_type = PACKET_TYPE_SBX;
 	}
+	else if (pDev->device_type == LWZ_DEVICE_TYPE_PINSCAPE_PICO)
+	{
+		// Pinscape Pico.  Pass the starting port number in the
+		// queue.
+		startingPortNum = pDev->ps_info.first_port_num;
+	}
 
 	// make sure we have a valid file handle
-	HUDEV hudev = lwz_get_hdev(g_plwz, indx);
-	if (hudev == NULL)
+	HUDEV huDev = NULL;
+	std::shared_ptr<PinscapePico::FeedbackControllerInterface> psPico;
+	if (!lwz_get_hdev(g_plwz, indx, huDev, psPico))
 		return;
 
 	// set up the SBA or SBX message
@@ -261,7 +303,7 @@ void LWZ_SBA(
 
 	#if defined(USE_SEPARATE_IO_THREAD)
 
-	queue_push(g_plwz->hqueue, hudev, packet_type, &data[0], 8);
+	queue_push(g_plwz->hqueue, huDev, &psPico, startingPortNum, packet_type, &data[0], 8);
 
 	#else
 
@@ -273,12 +315,10 @@ void LWZ_SBA(
 
 void LWZ_PBA(LWZHANDLE hlwz, BYTE const *pbrightness_32bytes)
 {
-#if DEBUG_LOGGING
-	LOG("PBA(unit=%d, {", hlwz);
+	LOG(LOGLEVEL_DEBUG, "PBA(unit=%d, {", hlwz);
 	for (int i = 0 ; i < 32 ; ++i)
-		LOG("%s%d:%d", i == 0 ? "" : ", ", i, pbrightness_32bytes[i]);
-	LOG("})\n");
-#endif
+		LOG(LOGLEVEL_DEBUG, "%s%d:%d", i == 0 ? "" : ", ", i, pbrightness_32bytes[i]);
+	LOG(LOGLEVEL_DEBUG, "})\n");
 
 	AUTOLOCK(g_cs);
 
@@ -294,17 +334,22 @@ void LWZ_PBA(LWZHANDLE hlwz, BYTE const *pbrightness_32bytes)
 	// for regular PBA messages, we'll send the caller's brightness
 	// byte array directly
 	const BYTE *pdata = pbrightness_32bytes;
+	size_t dataSize = 32;
 
 	// presume we'll use a send this as a standard PBA message
 	packet_type_t packet_type = PACKET_TYPE_PBA;
+
+	// buffer for rewritten message, for Pinscape and Pinscape Pico variants
+	BYTE bBuf[64];
 
 	// Check to see if this is addressed to a Pinscape unit or Pinscape
 	// virtual LedWiz interface.  If so, switch the message to the
 	// extended PBX format instead.
 	BOOL pbx = false;
-	lwz_device_t *pdev = &g_plwz->devices[indx];
+	lwz_device_t *pDev = &g_plwz->devices[indx];
 	int port_group = 0;
-	if (pdev->device_type == LWZ_DEVICE_TYPE_PINSCAPE && pdev->supports_sbx_pbx)
+	int starting_port_num = 0;
+	if (pDev->device_type == LWZ_DEVICE_TYPE_PINSCAPE && pDev->supports_sbx_pbx)
 	{
 		// It's a physical Pinscape unit, and it supports the extended
 		// SBX/PBX messages.  The updates are addressed to ports 1-32, so
@@ -316,11 +361,11 @@ void LWZ_PBA(LWZHANDLE hlwz, BYTE const *pbrightness_32bytes)
 		// the host and device getting out of sync.
 		pbx = true;
 	}
-	else if (pdev->device_type == LWZ_DEVICE_TYPE_PINSCAPE_VIRT)
+	else if (pDev->device_type == LWZ_DEVICE_TYPE_PINSCAPE_VIRT)
 	{
 		// It's a Pinscape virtual LedWiz unit.  Get the underlying
 		// physical Pinscape unit reference.
-		ps_virtual_lwz_t *ps = &g_plwz->devices[indx].ps_virtual_lwz;
+		auto *ps = &pDev->ps_info;
 
 		// Figure the port group.
 		// The port group tells the Pinscape unit which group of 8
@@ -342,19 +387,25 @@ void LWZ_PBA(LWZHANDLE hlwz, BYTE const *pbrightness_32bytes)
 		// ports.  So the group of 8 is offset*32/8 = offset*4.
 		port_group = 4*(indx - ps->base_unit);
 
-		// redirect the mesage to the Pinscape device as a PBX
+		// redirect the message to the Pinscape device as a PBX
 		pbx = true;
 		indx = ps->base_unit;
+	}
+	else if (pDev->device_type == LWZ_DEVICE_TYPE_PINSCAPE_PICO)
+	{
+		// Pinscape Pico virtual LedWiz.  We can transmit the 32
+		// profile bytes as-is, but we need to add the starting
+		// port number, which we'll pass in the queue.
+		starting_port_num = pDev->ps_info.first_port_num;
 	}
 
 	// If we're using the Pinscape extended PBX message, rewrite the
 	// message data using the PBX format.
-	BYTE bbuf[32];
 	if (pbx)
 	{
 		// Encode each set of 8 bytes as a PBX message
 		const BYTE *psrc = pdata;
-		BYTE *pdst = bbuf;
+		BYTE *pdst = bBuf;
 		for (int block = 0 ; block < 4 ;
 			 ++block, ++port_group, psrc += 8, pdst += 8)
 		{
@@ -388,18 +439,19 @@ void LWZ_PBA(LWZHANDLE hlwz, BYTE const *pbrightness_32bytes)
 		}
 
 		// use the encoded private copy instead of the original
-		pdata = bbuf;
+		pdata = bBuf;
 		packet_type = PACKET_TYPE_PBX;
 	}
 
 	// get the USB handle
-	HUDEV hudev = lwz_get_hdev(g_plwz, indx);
-	if (hudev == NULL)
+	HUDEV huDev = NULL;
+	std::shared_ptr<PinscapePico::FeedbackControllerInterface> psPico;
+	if (!lwz_get_hdev(g_plwz, indx, huDev, psPico))
 		return;
 
 	#if defined(USE_SEPARATE_IO_THREAD)
 
-	queue_push(g_plwz->hqueue, hudev, packet_type, pdata, 32);
+	queue_push(g_plwz->hqueue, huDev, &pDev->psPico, starting_port_num, packet_type, pdata, dataSize);
 
 	#else
 
@@ -417,29 +469,31 @@ DWORD LWZ_RAWWRITE(LWZHANDLE hlwz, BYTE const *pdata, DWORD ndata)
 	if (pdata == NULL || ndata == 0)
 		return 0;
 
-	if (ndata > 32)
-	    ndata = 32;
+	if (ndata > 63)
+	    ndata = 63;
 
-	HUDEV hudev = lwz_get_hdev(g_plwz, indx);
-
-	if (hudev == NULL) {
+	HUDEV huDev = NULL;
+	std::shared_ptr<PinscapePico::FeedbackControllerInterface> psPico;
+	if (!lwz_get_hdev(g_plwz, indx, huDev, psPico))
 		return 0;
-	}
 
 	int res = 0;
-	DWORD nbyteswritten = 0;
+	DWORD nBytesWritten = 0;
 
 	#if defined(USE_SEPARATE_IO_THREAD)
 
-	nbyteswritten = static_cast<DWORD>(queue_push(g_plwz->hqueue, hudev, PACKET_TYPE_RAW, pdata, ndata));
+	nBytesWritten = static_cast<DWORD>(queue_push(g_plwz->hqueue, huDev, nullptr, 0, PACKET_TYPE_RAW, pdata, ndata));
 
 	#else
 
-	usbdev_write(hudev, pdata, ndata);
+	if (hdDev != NULL)
+		nBytesWritten = usbdev_write(huDev, pdata, ndata);
+	else if (psPico != nullptr)
+		nBytesWritten = psPico->Write(pdata, ndata, 1000) ? ndata : 0;
 
 	#endif
 
-	return nbyteswritten;
+	return nBytesWritten;
 }
 
 DWORD LWZ_RAWREAD(LWZHANDLE hlwz, BYTE *pdata, DWORD ndata)
@@ -454,22 +508,33 @@ DWORD LWZ_RAWREAD(LWZHANDLE hlwz, BYTE *pdata, DWORD ndata)
 	if (ndata > 64)
 	    ndata = 64;
 
-	HUDEV hudev = lwz_get_hdev(g_plwz, indx);
+	IF_SEPARATE_IO_THREAD(queue_wait_empty(g_plwz->hqueue));
 
-	if (hudev == NULL) {
+	HUDEV huDev = NULL;
+	std::shared_ptr<PinscapePico::FeedbackControllerInterface> psPico;
+	if (!lwz_get_hdev(g_plwz, indx, huDev, psPico))
 		return 0;
+
+	if (huDev != NULL)
+		return static_cast<DWORD>(usbdev_read(huDev, pdata, ndata));
+	else if (psPico != nullptr)
+	{
+		PinscapePico::FeedbackControllerReport rpt;
+		if (psPico->Read(rpt, 2500))
+		{
+			if (ndata > 0) pdata[0] = rpt.type;
+			if (ndata > 1) memcpy(&pdata[1], rpt.args, min(ndata - 1, sizeof(rpt.args)));
+			return ndata;
+		}
 	}
 
-	#if defined(USE_SEPARATE_IO_THREAD)
-	queue_wait_empty(g_plwz->hqueue);
-	#endif
-
-	return static_cast<DWORD>(usbdev_read(hudev, pdata, ndata));
+	// failed
+	return 0;
 }
 
 void LWZ_REGISTER(LWZHANDLE hlwz, HWND hwnd)
 {
-	LOG(hwnd == 0 ? "LWZ_REGISTER(%d, null)\n" : "LWZ_REGISTER(%d, %lx)\n",
+	LOG(LOGLEVEL_NORMAL, hwnd == 0 ? "LWZ_REGISTER(%d, null)\n" : "LWZ_REGISTER(%d, %lx)\n",
 		hlwz, hwnd);
 
 	AUTOLOCK(g_cs);
@@ -489,17 +554,15 @@ void LWZ_SET_NOTIFY_EX(LWZNOTIFYPROC_EX notify_ex_cb, void * puser, LWZDEVICELIS
 	h->cb.notify_ex = notify_ex_cb;
 	h->cb.puser = puser;
 
-	if (h->plist)
-	{
+	if (h->plist != nullptr)
 		memset(h->plist, 0x00, sizeof(*plist));
-	}
 
 	lwz_refreshlist_attached(h);
 }
 
 void LWZ_SET_NOTIFY(LWZNOTIFYPROC notify_cb, LWZDEVICELIST *plist)
 {
-	LOG("LWZ_SET_NOTIFY(cb=%08lx, listp=%08lx)\n", notify_cb, plist);
+	LOG(LOGLEVEL_NORMAL, "LWZ_SET_NOTIFY(cb=%08lx, listp=%08lx)\n", notify_cb, plist);
 
 	AUTOLOCK(g_cs);
 
@@ -512,17 +575,13 @@ void LWZ_SET_NOTIFY(LWZNOTIFYPROC notify_cb, LWZDEVICELIST *plist)
 	lwz_freelist(h);
 
 	// set new list pointer and callbacks
-
 	h->plist = plist;
 	h->cb.notify = notify_cb;
 
-	if (h->plist)
-	{
+	if (h->plist != nullptr)
 		memset(h->plist, 0x00, sizeof(*plist));
-	}
 
 	// create a new internal list of available devices
-
 	lwz_refreshlist_attached(h);
 }
 
@@ -600,7 +659,7 @@ BOOL LWZ_GET_DEVICE_INFO(LWZHANDLE hlwz, LWZDEVICEINFO *info)
 
 
 //**********************************************************************************************************************
-// Low level implementation 
+// Internal implementation 
 //**********************************************************************************************************************
 
 BOOL WINAPI DllMain(
@@ -610,8 +669,6 @@ BOOL WINAPI DllMain(
 {
 	if (fdwReason == DLL_PROCESS_ATTACH)
 	{
-		LOG("*****\n"
-			"LEDWIZ.DLL loading\n\n");
 		InitializeCriticalSection(&g_cs);
 
 		g_plwz = lwz_open(hinstDLL);
@@ -621,12 +678,14 @@ BOOL WINAPI DllMain(
 			DeleteCriticalSection(&g_cs);
 			return FALSE;
 		}
+
+		LOG(LOGLEVEL_NORMAL, "*****\n"
+			"LEDWIZ.DLL loading\n\n");
 	}
 	else if (fdwReason == DLL_PROCESS_DETACH)
 	{
 		{
 			AUTOLOCK(g_cs);
-
 			lwz_close(g_plwz);
 		}
 
@@ -689,12 +748,62 @@ static LRESULT CALLBACK lwz_wndproc(
 static lwz_context_t * lwz_open(HINSTANCE hinstDLL)
 {
 	// allocate the context
-	lwz_context_t * const h = (lwz_context_t *)malloc(sizeof(lwz_context_t));
+	lwz_context_t * const h = new lwz_context_t();
 	if (h == NULL)
 		return NULL;
 
 	// clear the context structure to all zeroes
 	memset(h, 0x00, sizeof(*h));
+
+	// get the directory path containing the DLL
+	char path[MAX_PATH];
+	GetModuleFileNameA(hinstDLL, path, _countof(path));
+	PathRemoveFileSpecA(path);
+
+	// load the config file
+	char configFile[MAX_PATH];
+	PathCombineA(configFile, path, "ledwiz.dll.config");
+	if (FILE *fp; fopen_s(&fp, configFile, "r") == 0 && fp != nullptr)
+	{
+		// read the file
+		for (;;)
+		{
+			// read a line
+			char buf[256];
+			if (fgets(buf, _countof(buf), fp) == nullptr)
+				break;
+
+			// parse it
+			std::match_results<const char*> m;
+			static const std::regex pat("\\s*(\\w+)\\s*=\\s*(.*?)\\s*\\n?");
+			if (std::regex_match(buf, m, pat))
+			{
+				// matched - check the keyword
+				if (m[1].str() == "logging")
+				{
+					// logging = <log level>
+					h->logLevel = atoi(m[2].str().c_str());;
+				}
+			}
+		}
+
+		// done with the file
+		fclose(fp);
+	}
+
+	// if logging is enabled, open a log file, named based on the current time
+	// to keep it separate from files created by other concurrent processes
+	// using the DLL
+	if (h->logLevel > 0)
+	{
+		char logName[MAX_PATH];
+		SYSTEMTIME st;
+		GetLocalTime(&st);
+		_snprintf_s(logName, _TRUNCATE, "%s\\LedWiz-%04d%02d%02d-%02d%02d%02d.log",
+			path, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+		if (fopen_s(&h->fpLog, logName, "w") != 0)
+			h->fpLog = nullptr;
+	}
 
 	// initialize all unit types to None
 	for (int i = 0 ; i < LWZ_MAX_DEVICES ; ++i)
@@ -719,7 +828,6 @@ static void lwz_close(lwz_context_t *h)
 
 	// close all open device handles and
 	// unhook our window proc (and unregister the device change notifications)
-
 	lwz_freelist(h);
 	lwz_register(h, 0, NULL);
 
@@ -731,9 +839,12 @@ static void lwz_close(lwz_context_t *h)
 	}
 	#endif
 
-	// free resources
+	// close the log file
+	if (h->fpLog != nullptr)
+		fclose(h->fpLog);
 
-	free(h);
+	// free resources
+	delete h;
 }
 	
 static void lwz_register(lwz_context_t *h, int indx, HWND hwnd)
@@ -755,7 +866,8 @@ static void lwz_register(lwz_context_t *h, int indx, HWND hwnd)
 			return;
 
 		// verify that there's a device at this index
-		if (h->devices[indx].hudev == NULL)
+		auto &d = h->devices[indx];
+		if (d.hudev == NULL && d.psPico == nullptr)
 			return;
 
 		// "subclass" the window to intercept messages
@@ -809,22 +921,30 @@ static void lwz_register(lwz_context_t *h, int indx, HWND hwnd)
 	}
 }
 
-static HUDEV lwz_get_hdev(lwz_context_t *h, int indx)
+static bool lwz_get_hdev(lwz_context_t *h, int indx, 
+	HUDEV &huDev, std::shared_ptr<PinscapePico::FeedbackControllerInterface> &psPico)
 {
-	if (indx < 0 ||
-	    indx >= LWZ_MAX_DEVICES)
-	{
-		return NULL;
-	}
+	// validate the index
+	if (indx < 0 || indx >= LWZ_MAX_DEVICES)
+		return false;
 
-	return h->devices[indx].hudev;
+	// populate the handles
+	auto &pDev = h->devices[indx];
+	huDev = pDev.hudev;
+	psPico = pDev.psPico;
+	return true;
+}
+
+static std::shared_ptr<PinscapePico::FeedbackControllerInterface> lwz_get_pspico(lwz_context_t *h, int indx)
+{
+
 }
 
 static void lwz_notify_callback(lwz_context_t *h, int reason, LWZHANDLE hlwz)
 {
 	if (h->cb.notify != 0)
 	{
-		LOG("NOTIFY(reason=%d (%s), unit=%d)\n",
+		LOG(LOGLEVEL_NORMAL, "NOTIFY(reason=%d (%s), unit=%d)\n",
 			reason,
 			reason == LWZ_REASON_ADD ? "Add" : reason == LWZ_REASON_DELETE ? "Delete" : "Unknown",
 			hlwz);
@@ -833,7 +953,7 @@ static void lwz_notify_callback(lwz_context_t *h, int reason, LWZHANDLE hlwz)
 
 	if (h->cb.notify_ex != 0)
 	{
-		LOG("NOTIFY_EX(reason=%d (%s), unit=%d)\n",
+		LOG(LOGLEVEL_NORMAL, "NOTIFY_EX(reason=%d (%s), unit=%d)\n",
 			reason,
 			reason == LWZ_REASON_ADD ? "Add" : reason == LWZ_REASON_DELETE ? "Delete" : "Unknown",
 			hlwz);
@@ -886,7 +1006,7 @@ static void lwz_add(lwz_context_t *h, int ndevices, const int *device_indices)
 			{
 				h->plist->handles[h->plist->numdevices] = hlwz;
 				h->plist->numdevices += 1;
-				LOG("lwz_add(unit=%d, #devices=%d)\n", hlwz, h->plist->numdevices);
+				LOG(LOGLEVEL_NORMAL, "lwz_add(unit=%d, #devices=%d)\n", hlwz, h->plist->numdevices);
 			}
 		}
 	}
@@ -933,25 +1053,17 @@ static void lwz_refreshlist_detached(lwz_context_t *h)
 
 	for (int i = 0; i < LWZ_MAX_DEVICES; i++)
 	{
-		if (h->devices[i].hudev != NULL)
+		auto *dev = &h->devices[i];
+		if (dev->hudev != NULL)
 		{
 			// try opening the device handle again
-			SP_DEVICE_INTERFACE_DETAIL_DATA_A * pdiddat = (SP_DEVICE_INTERFACE_DETAIL_DATA_A *)&h->devices[i].dat[0];
-			HANDLE hdev = CreateFileA(
-				pdiddat->DevicePath,
-				GENERIC_READ | GENERIC_WRITE,
-				FILE_SHARE_READ | FILE_SHARE_WRITE,
-				NULL,
-				OPEN_EXISTING,
-				0,
-				NULL);
+			SP_DEVICE_INTERFACE_DETAIL_DATA_A * pdiddat = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_A*>(dev->diDetail.data());
+			HANDLE hdev = CreateFileA(pdiddat->DevicePath, GENERIC_READ | GENERIC_WRITE,
+				FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
 
 			// if we couldn't open the handle, the device must have been unplugged
 			if (hdev == INVALID_HANDLE_VALUE)
 			{
-				// get the device descriptor entry
-				lwz_device_t *dev = &h->devices[i];
-
 				// If this is a Pinscape device, remove any virtual LedWiz units
 				// that refer back to it.
 				if (dev->device_type == LWZ_DEVICE_TYPE_PINSCAPE)
@@ -971,7 +1083,7 @@ static void lwz_refreshlist_detached(lwz_context_t *h)
 						// check to see if it's a virtual LedWiz interface that's
 						// tied to the Pinscape interface we're deleting
 						if (vdev->device_type == LWZ_DEVICE_TYPE_PINSCAPE_VIRT
-							&& vdev->ps_virtual_lwz.base_unit == i)
+							&& vdev->ps_info.base_unit == i)
 						{
 							// it's one of ours - remove this interface too
 							vdev->device_type = LWZ_DEVICE_TYPE_NONE;
@@ -996,22 +1108,32 @@ static void lwz_refreshlist_detached(lwz_context_t *h)
 				CloseHandle(hdev);
 			}
 		}
+		else if (dev->psPico != nullptr)
+		{
+			// reconnect the Pico
+			if (!dev->psPico->TestFileSystemPath())
+			{
+				// device no longer active - release the interface object
+				dev->psPico.reset();
+				dev->device_type = LWZ_DEVICE_TYPE_NONE;
+
+				// remove the device from the user list and notify the user callback
+				lwz_remove(h, i);
+			}
+		}
 	}
 }
 
 static void lwz_refreshlist_attached(lwz_context_t *h)
 {
-	LOG("Refreshing attached device list\n");
+	LOG(LOGLEVEL_NORMAL, "Refreshing attached device list\n");
 
 	// no new devices found yet
 	int num_new_devices = 0;
 	int new_devices[LWZ_MAX_DEVICES];
 
 	// set up a search on all HID devices
-	HDEVINFO hDevInfo = SetupDiGetClassDevsA(
-		&HIDguid, 
-		NULL, 
-		NULL, 
+	HDEVINFO hDevInfo = SetupDiGetClassDevsA(&HIDguid, NULL, NULL,
 		DIGCF_PRESENT | DIGCF_INTERFACEDEVICE);
 
 	// we can't proceed unless we got the HID list
@@ -1019,40 +1141,33 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 		return;
 
 	// go through all available devices and look for the proper VID/PID
-	for (DWORD dwindex = 0 ; ; dwindex++)
+ 	for (DWORD dwindex = 0 ; ; dwindex++)
 	{
-		// get the next interface in the HID list
+		// get the next interface in the HID list; stop on failure, which
+		// indicates the end of the list
 		SP_DEVICE_INTERFACE_DATA didat = {};
 		didat.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
-		BOOL bres = SetupDiEnumDeviceInterfaces(
-			hDevInfo,
-			NULL,
-			&HIDguid,
-			dwindex,
-			&didat);
-
-		// if that failed, we've reached the end of the list
-		if (bres == FALSE)
+		if (!SetupDiEnumDeviceInterfaces(hDevInfo, NULL, &HIDguid, dwindex, &didat))
 			break;
 
-		// retrieve the device detail
-		lwz_device_t device_tmp = { };
-		SP_DEVICE_INTERFACE_DETAIL_DATA_A * pdiddat = (SP_DEVICE_INTERFACE_DETAIL_DATA_A *)&device_tmp.dat[0];
-		pdiddat->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
-		bres = SetupDiGetDeviceInterfaceDetailA(
-			hDevInfo,
-			&didat,
-			pdiddat,
-			sizeof(device_tmp.dat),
-			NULL,
-			NULL);
-
-		// if we couldn't get the device detail, proceed to the next device
-		if (bres == FALSE)
+		// get the device detail size
+		DWORD requiredSize = 0;
+		SetupDiGetDeviceInterfaceDetailA(hDevInfo, &didat, NULL, 0, &requiredSize, NULL);
+		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
 			continue;
-		
+
+		// allocate a buffer for the detail data
+		lwz_device_t device_tmp;
+		device_tmp.diDetail.resize(requiredSize);
+
+		// retrieve the device detail
+		SP_DEVICE_INTERFACE_DETAIL_DATA_A *pDiDetail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_A*>(device_tmp.diDetail.data());
+		pDiDetail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
+		if (!SetupDiGetDeviceInterfaceDetailA(hDevInfo, &didat, pDiDetail, requiredSize, NULL, NULL))
+			continue;
+
 		// open the file handle to the USB device
-		device_tmp.hudev = usbdev_create(pdiddat->DevicePath);
+		device_tmp.hudev = usbdev_create(pDiDetail->DevicePath);
 		if (device_tmp.hudev != NULL)
 		{
 			// retrieve the HID attributes
@@ -1062,8 +1177,8 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 				usbdev_handle(device_tmp.hudev),
 				&attrib);
 
-			LOG(". Found USB HID device, VID %04X, PID %04X\n", attrib.VendorID, attrib.ProductID);
-			
+			LOG(LOGLEVEL_NORMAL, ". Found USB HID device, VID %04X, PID %04X\n", attrib.VendorID, attrib.ProductID);
+
 			// Check to see if this looks like an LedWiz VID/PID combo.  LedWiz devices
 			// identify as Vendor ID FAFA, Product ID 00F0..00FF.  The low 4 bits of the
 			// product ID is by convention the LedWiz "unit number".  The API uses this
@@ -1071,28 +1186,28 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 			// desired unit.  The nominal unit number is in the range 1..16, so it's
 			// equivalent to (ProductID & 0x000F) + 1.
 			int indx = (int)attrib.ProductID - (int)ProductID_LEDWiz_min;
-			if (bSuccess && 
-			    (attrib.VendorID == VendorID_LEDWiz || attrib.VendorID == VendorID_Zebs) &&
-			    indx >= 0 && indx < LWZ_MAX_DEVICES)
+			if (bSuccess &&
+				(attrib.VendorID == VendorID_LEDWiz || attrib.VendorID == VendorID_Zebs) &&
+				indx >= 0 && indx < LWZ_MAX_DEVICES)
 			{
 				// It's an LedWiz, according to the VID/PID
-				LOG(".. vendor/product code matches LedWiz, checking HID descriptors\n", indx+1);
+				LOG(LOGLEVEL_NORMAL, ".. vendor/product code matches LedWiz, checking HID descriptors\n", indx+1);
 
 				// Before we conclude for sure that it's an LedWiz, though, do some more
 				// checks.  Retrieve the preparsed data for the device.
 				PHIDP_PREPARSED_DATA p_prepdata = NULL;
 				if (HidD_GetPreparsedData(usbdev_handle(device_tmp.hudev), &p_prepdata) == TRUE)
 				{
-					LOG(".. retrieved preparsed data OK\n");
+					LOG(LOGLEVEL_NORMAL, ".. retrieved preparsed data OK\n");
 
 					// get the HID capabilities struct
 					HIDP_CAPS caps = {};
 					if (HIDP_STATUS_SUCCESS == HidP_GetCaps(p_prepdata, &caps))
 					{
-						LOG(".. retrieved HID capabilities: "
+						LOG(LOGLEVEL_NORMAL, ".. retrieved HID capabilities: "
 							" link collection nodes %d, output report length %d\n",
 							caps.NumberLinkCollectionNodes, caps.OutputReportByteLength);
-						
+
 						// Apply heuristic filters:
 						//
 						// 1. Output report byte length
@@ -1115,7 +1230,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 						// to the HID scan like a completely separate device.  We want
 						// to skip that virtual device since it doesn't accept LedWiz 
 						// output reports.  (Note that it would filter out more false
-						// positivies if we "ruled in" specific HID usages rather than
+						// positives if we "ruled in" specific HID usages rather than
 						// only "ruling out" the keyboard, but that would also be less
 						// flexible at recognizing future product updates from GGG and
 						// future clones and emulators.  In practice, false positives
@@ -1140,7 +1255,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 						if (caps.OutputReportByteLength == 9
 							&& !(caps.UsagePage == 1 && caps.Usage == 6)) // USB keyboard = page 1/usage 6
 						{
-							LOG(".. link collection node count, report length, and USB usage match LedWiz\n");
+							LOG(LOGLEVEL_NORMAL, ".. link collection node count, report length, and USB usage match LedWiz\n");
 
 							// presume it's a real LedWiz or some clone/emulation we don't
 							// handle specially
@@ -1166,7 +1281,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 								if (wcsstr(manustr, L"zebsboards") != NULL)
 								{
 									// mark it as a zeb's output control device
-									LOG(".. ZB Output Control detected\n");
+									LOG(LOGLEVEL_NORMAL, ".. ZB Output Control detected\n");
 									device_tmp.device_type = LWZ_DEVICE_TYPE_ZB;
 
 									// this device doesn't need USB delays
@@ -1176,7 +1291,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 								{
 									// it's not a Zebsboards unit, so it must not be an LedWiz
 									// emulator after all
-									LOG(".. Device uses VID 0x20A0, but manufacturer string doesn't contain 'zebsboards' - rejecting\n");
+									LOG(LOGLEVEL_NORMAL, ".. Device uses VID 0x20A0, but manufacturer string doesn't contain 'zebsboards' - rejecting\n");
 									device_tmp.device_type = LWZ_DEVICE_TYPE_NONE;
 								}
 							}
@@ -1190,23 +1305,19 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 							{
 								// save the product string
 								size_t retlen;
-								wcstombs_s(
-									&retlen,
-									device_tmp.device_name,
-									sizeof(device_tmp.device_name),
-									prodstr,
-									_TRUNCATE);
-								
+								wcstombs_s(&retlen, device_tmp.device_name, sizeof(device_tmp.device_name),
+									prodstr, _TRUNCATE);
+
 								// check for the special device types
 								if (wcsstr(prodstr, L"Pinscape Controller") != 0)
 								{
 									// It's a Pinscape unit
-									LOG(".. Pinscape Controller identified\n");
+									LOG(LOGLEVEL_NORMAL, ".. Pinscape Controller identified\n");
 									device_tmp.device_type = LWZ_DEVICE_TYPE_PINSCAPE;
 
 									// Pinscape doesn't need USB delays
 									usbdev_set_min_write_interval(device_tmp.hudev, 0);
-									
+
 									// Query the number of outputs by sending a QUERY CONFIGURATION
 									// special request (65 4).  Clear the input buffer before making
 									// the request, since the input buffer could be full of regular
@@ -1242,24 +1353,19 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 
 											// add the pinscape unit number to the name
 											char unitno[20];
-											_snprintf_s(
-												unitno, sizeof(unitno), _TRUNCATE,
-												" (Unit %d)", int(rbuf[4] + 1));
-											safe_strcat(
-												device_tmp.device_name,
-												sizeof(device_tmp.device_name),
-												unitno);
-											
+											_snprintf_s(unitno, sizeof(unitno), _TRUNCATE, " (Unit %d)", int(rbuf[4] + 1));
+											safe_strcat(device_tmp.device_name, sizeof(device_tmp.device_name), unitno);
+
 											// we can stop looking for a report now
 											break;
 										}
 									}
 								}
 								else if (wcslen(prodstr) >= 9
-										 && memcmp(prodstr, L"LWCloneU2", 9*sizeof(wchar_t)) == 0)
+									&& memcmp(prodstr, L"LWCloneU2", 9*sizeof(wchar_t)) == 0)
 								{
 									// It's an LWCloneU2 unit
-									LOG(".. LWCloneU2 identified\n");
+									LOG(LOGLEVEL_NORMAL, ".. LWCloneU2 identified\n");
 									device_tmp.device_type = LWZ_DEVICE_TYPE_LWCLONEU2;
 
 									// LWCloneU2 doesn't need USB delays
@@ -1270,7 +1376,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 							// if we decided to keep this device, add it
 							if (device_tmp.device_type != LWZ_DEVICE_TYPE_NONE)
 							{
-								LOG(".. attempting to add device\n");
+								LOG(LOGLEVEL_NORMAL, ".. attempting to add device\n");
 
 								// If this slot contains a Pinscape virtual LedWiz interface,
 								// remove the virtual device so that we can use the slot for
@@ -1278,7 +1384,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 								if (h->devices[indx].device_type == LWZ_DEVICE_TYPE_PINSCAPE_VIRT)
 								{
 									// remove the virtual interface and notify the user callback
-									LOG(".. this slot has a Pinscape virtual LedWiz; this real device overrides that\n");
+									LOG(LOGLEVEL_NORMAL, ".. this slot has a Pinscape virtual LedWiz; this real device overrides that\n");
 									h->devices[indx].device_type = LWZ_DEVICE_TYPE_NONE;
 									lwz_remove(h, indx);
 								}
@@ -1287,13 +1393,13 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 								if (h->devices[indx].hudev == NULL)
 								{
 									// copy the temp device struct to the active device list entry
-									memcpy(&h->devices[indx], &device_tmp, sizeof(device_tmp));
+									h->devices[indx] = std::move(device_tmp);
 
 									// the device list entry now owns the file handle, so forget it
 									// in the temp struct
 									device_tmp.hudev = NULL;
 
-									LOG(".. device added successfully, %d devices total\n", num_new_devices);
+									LOG(LOGLEVEL_NORMAL, ".. device added successfully, %d devices total\n", num_new_devices);
 
 									// add it to our list of new devices found on this search
 									if (num_new_devices < LWZ_MAX_DEVICES)
@@ -1302,7 +1408,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 								}
 								else
 								{
-									LOG(".. unit slot already in use; device not added\n");
+									LOG(LOGLEVEL_NORMAL, ".. unit slot already in use; device not added\n");
 								}
 							}
 						}
@@ -1328,7 +1434,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 	if (hDevInfo != NULL)
 		SetupDiDestroyDeviceInfoList(hDevInfo);
 
-	// Set up any needed Pinsape virtual LedWiz interfaces.  For each
+	// Set up any needed Pinscape virtual LedWiz interfaces.  For each
 	// Pinscape unit with more than 32 outputs, we'll set up one virtual
 	// LedWiz object for each block of 32 outputs beyond the first 32.
 	for (int i = 0 ; i < num_new_devices ; ++i)
@@ -1342,8 +1448,8 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 		{
 			// add a virtual device for each additional block of ports
 			for (int vidx = newidx + 1, portno = 32 ;
-				 vidx < LWZ_MAX_DEVICES && portno < newdev->num_outputs ;
-				 ++vidx, portno += 32)
+				vidx < LWZ_MAX_DEVICES && portno < newdev->num_outputs ;
+				++vidx, portno += 32)
 			{
 				// if this slot isn't already populated with a real device,
 				// add the virtual device
@@ -1353,15 +1459,86 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 					// set it up as a virtual LedWiz for this block of
 					// ports, referring back to the real Pinscape device
 					vdev->device_type = LWZ_DEVICE_TYPE_PINSCAPE_VIRT;
-					vdev->ps_virtual_lwz.base_unit = newidx;
+					vdev->ps_info.base_unit = newidx;
+					vdev->ps_info.first_port_num = portno;
 
 					// synthesize a name based on the base unit name
-					_snprintf_s(vdev->device_name, sizeof(vdev->device_name), _TRUNCATE,
-								"%s Ports %d-%d", h->devices[newidx].device_name, portno+1, portno+32);
+					_snprintf_s(vdev->device_name, _TRUNCATE, "%s Ports %d-%d", 
+						h->devices[newidx].device_name, portno+1, portno+32);
 
 					// count this as a new device in the notification list
 					if (num_new_devices < LWZ_MAX_DEVICES)
 						new_devices[num_new_devices++] = vidx;
+				}
+			}
+		}
+	}
+
+	// search for Pinscape Pico devices
+	std::list<PinscapePico::FeedbackControllerInterface::Desc> picos;
+	if (SUCCEEDED(PinscapePico::FeedbackControllerInterface::Enumerate(picos)))
+	{
+		// add each LedWiz-enabled Pico
+		for (auto &pico : picos)
+		{
+			// if the desired LedWiz unit number is non-zero, LedWiz emulation is 
+			// enabled and the device has at least one logical output port
+			if (pico.ledWizUnitNum != 0 && pico.numOutputPorts != 0)
+			{
+				// it's enabled
+				LOG(LOGLEVEL_NORMAL, ". Found Pinscape Pico unit #%d (%s, HWID %s), virtual LedWiz unit #%d, %d ports\n",
+					pico.unitNum, pico.unitName.c_str(), pico.hwId.ToString().c_str(), pico.ledWizUnitNum, pico.numOutputPorts);
+
+				// open the interface
+				std::shared_ptr<PinscapePico::FeedbackControllerInterface> fci(PinscapePico::FeedbackControllerInterface::Open(pico));
+				if (fci == nullptr)
+				{
+					LOG(LOGLEVEL_NORMAL, ". Unable to open feedback controller interface\n");
+					continue;
+				}
+
+				// synthesize a name for the virtual devices
+				char baseName[128];
+				_snprintf_s(baseName, _TRUNCATE, "Pinscape Pico #%d (%s)", pico.unitNum, pico.unitName.c_str());
+
+				// populate one virtual LedWiz unit per 32 output ports
+				for (int devIndex = pico.ledWizUnitNum - 1, basePortNum = 1 ; 
+					basePortNum <= pico.numOutputPorts && devIndex < 16 ;
+					++devIndex, basePortNum += 32)
+				{
+					// only populate the virtual device if it's not already occupied
+					auto &d = h->devices[devIndex];
+					if (d.device_type == LWZ_DEVICE_TYPE_NONE)
+					{
+						// figure the ending output number
+						int lastPortNum = min(basePortNum + 31, pico.numOutputPorts);
+
+						// add the device
+						d.device_type = LWZ_DEVICE_TYPE_PINSCAPE_PICO;
+						d.ps_info.base_unit = pico.ledWizUnitNum - 1;
+						d.ps_info.first_port_num = basePortNum;
+
+						// store the interface pointer
+						d.psPico = fci;
+
+						// synthesize a name
+						_snprintf_s(d.device_name, _TRUNCATE, "%s Ports %d-%d", 
+							baseName, basePortNum, lastPortNum);
+
+						// add it to the new items notification list
+						if (num_new_devices < LWZ_MAX_DEVICES)
+							new_devices[num_new_devices++] = devIndex;
+
+						// log it
+						LOG(LOGLEVEL_NORMAL, ".. Adding virtual LedWiz unit #%d for Pinscape Pico ports %d..%d\n", 
+							devIndex + 1, basePortNum, lastPortNum);
+					}
+					else
+					{
+						// slot already taken - the original device overrides the Pinscape Pico
+						LOG(LOGLEVEL_NORMAL, ".. LedWiz unit #%d is already populated as %s; cannot add a Pinscape Pico virtual unit here\n",
+							devIndex + 1, d.device_name);
+					}
 				}
 			}
 		}
@@ -1375,24 +1552,47 @@ static void lwz_freelist(lwz_context_t *h)
 {
 	for (int i = 0; i < LWZ_MAX_DEVICES; i++)
 	{
-		if (h->devices[i].hudev != NULL)
+		auto &d = h->devices[i];
+		if (d.hudev != NULL)
 		{
-			usbdev_release(h->devices[i].hudev);
-			h->devices[i].hudev = NULL;
+			usbdev_release(d.hudev);
+			d.hudev = NULL;
+		}
+		if (d.psPico != nullptr)
+		{
+			d.psPico.reset();
 		}
 	}
 }
 
-// simple fifo to move the WriteFile() calls to a seperate thread
+// simple FIFO to move the WriteFile() calls to a separate thread
+struct fifo_msg_t
+{
+	HUDEV hudev = NULL;
+	std::shared_ptr<PinscapePico::FeedbackControllerInterface> psPico;
+	int starting_port_num = 0;
+	packet_type_t typ = PACKET_TYPE_NONE;
+	size_t ndata = 0;
+	uint8_t data[64];		// maximum USB HID packet size
+};
 
-typedef struct {
-	HUDEV hudev;
-	packet_type_t typ;
-	size_t ndata;
-	uint8_t data[32];
-} chunk_t;
-
-#define QUEUE_LENGTH   64   // the maximum bandwidth of the device is around 2 kByte/s so a length of 64 corresponds to one second
+// The Pinscape KL25Z and Pinscape Pico are USB 1.1 "full speed" devices,
+// which can transact one frame per millisecond, or 1000 frames per second.
+// I don't know the USB level of the Arduino that LWCloneU2 originally
+// targeted; the original author's comments here said that "the device"
+// had a bandwidth of 2kbps, but I don't know if "the device" in question
+// is the genuine LedWiz or the Arduino-based clone.  Both are plausible,
+// and the LedWiz empirically can't handle more than about one command
+// every 16ms, or about 64 commands per second.  The Pinscape devices,
+// and probably other newer clones like the Zebsboard devices, can handle
+// much higher rates, so let's allow for a fairly large backlog in the
+// queue.  It's probably not desirable to make the queue *too* big, though,
+// since a long queue could turn into significant latency in the effects 
+// triggering on the device.  It's probably better to stall the client 
+// application before the backlog grows too large, in case the client is 
+// in some kind of pathological situation where it's sending updates at 
+// an unthrottled pace.
+#define QUEUE_LENGTH 256
 
 typedef struct {
 	int rpos;
@@ -1408,7 +1608,7 @@ typedef struct {
 	bool rblocked;
 	bool wblocked;
 	bool eblocked;
-	chunk_t buf[QUEUE_LENGTH];
+	fifo_msg_t buf[QUEUE_LENGTH];
 } queue_t;
 
 
@@ -1420,17 +1620,45 @@ static DWORD WINAPI QueueThreadProc(LPVOID lpParameter)
 	{
 		uint8_t buffer[64];
 
+		packet_type_t packet_type;
 		HUDEV hudev = NULL;
-		size_t ndata = queue_shift(h, &hudev, &buffer[0], sizeof(buffer));
+		std::shared_ptr<PinscapePico::FeedbackControllerInterface> psPico;
+		int starting_port_num;
+		size_t ndata = queue_shift(h, packet_type, &hudev, psPico, starting_port_num, &buffer[0], sizeof(buffer));
 
-		// exit thread if required
-
-		if (ndata == 0 || hudev == NULL) {
+		// exit thread if requested by an empty packet
+		if (ndata == 0)
 			break;
-		}
 
-		usbdev_write(hudev, &buffer[0], ndata);
-		usbdev_release(hudev);
+		// check the underlying device type
+		if (hudev != NULL)
+		{
+			// direct HID device handle
+			usbdev_write(hudev, &buffer[0], ndata);
+			usbdev_release(hudev);
+		}
+		else if (psPico != nullptr)
+		{
+			// Pinscape Pico interface
+			switch (packet_type)
+			{
+			case PACKET_TYPE_SBA:
+				// parse the queued SBA message data and pass to the Pico unit
+				psPico->LedWizSBA(starting_port_num, buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], 1000);
+				break;
+
+			case PACKET_TYPE_PBA:
+				// parse the queued PBA message, which simply consists of the 32 "profile"
+				// bytes, and pass it to the Pico
+				psPico->LedWizPBA(starting_port_num, 32, buffer, 1000);
+				break;
+
+			case PACKET_TYPE_RAW:
+				// pass the buffer to the Pico as a raw write
+				psPico->Write(buffer, ndata, 1000);
+				break;
+			}
+		}
 	}
 
 	SetEvent(h->hqevent);
@@ -1442,15 +1670,14 @@ static void queue_close(HQUEUE hqueue, bool unload)
 {
 	queue_t * const h = (queue_t*)hqueue;
 
-	if (h == NULL) {
+	if (h == NULL)
 		return;
-	}
 
-	if (h->hthread)
+	if (h->hthread != NULL)
 	{
-		// Add a magic "quit" item to the queue, identified by null device
-		// and data pointers.  The thread quits when it reads this item.
-		queue_push(h, NULL, PACKET_TYPE_RAW, NULL, 0);
+		// Add a special "quit" item to the queue, identified by a zero
+		// data length.  The thread quits when it reads this item.
+		queue_push(h, NULL, nullptr, 0, PACKET_TYPE_RAW, NULL, 0);
 
 		if (unload)
 		{
@@ -1458,7 +1685,6 @@ static void queue_close(HQUEUE hqueue, bool unload)
 			// if we are closed within the DLL unload.
 			// this would result in a deadlock
 			// instead we sync with the 'hqevent' that is set at the end of the thread routine
-
 			WaitForSingleObject(h->hqevent, INFINITE);
 			CloseHandle(h->hthread);
 			h->hthread = NULL;
@@ -1470,6 +1696,10 @@ static void queue_close(HQUEUE hqueue, bool unload)
 			h->hthread = NULL;
 		}
 	}
+
+	// make sure that all queue elements are cleared
+	for (auto &c : h->buf)
+		c.psPico.reset();
 
 	if (h->hrevent)
 	{
@@ -1558,14 +1788,15 @@ static void queue_wait_empty(HQUEUE hqueue)
 	}
 }
 
-static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t const *pdata, size_t ndata)
+static size_t queue_push(HQUEUE hqueue, 
+	HUDEV hudev, std::shared_ptr<PinscapePico::FeedbackControllerInterface> *psPico,
+	int starting_port_num, packet_type_t typ, uint8_t const *pdata, size_t ndata)
 {
 	queue_t * const h = (queue_t*)hqueue;
 
 	if (pdata == NULL || ndata == 0 || ndata > sizeof(h->buf[0].data)) 
 	{
 		// push empty chunk to signal shutdown
-
 		pdata = NULL;
 		ndata = 0;
 		hudev = NULL;
@@ -1577,7 +1808,6 @@ static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t 
 		bool do_unblock = false;
 
 		// check if there is some space to write into the queue
-
 		{
 			AUTOLOCK(h->cs);
 
@@ -1596,16 +1826,14 @@ static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t 
 			// the last one to the device yet, so commands are coming faster
 			// than the device can accept them.  It's better to apply the
 			// latest update in this case than to apply all of the intermediate
-			// updates getting here.  This makes fades less smooth, but it's
-			// much better to have the real-time device state match the client
-			// state so that effects aren't delayed from what's going on in the
-			// game.
+			// updates getting here.  This makes fades less smooth, but that's
+			// better than latency.
 			if (typ == PACKET_TYPE_PBA)
 			{
 				for (int i = 0, pos = h->rpos ; i < h->level ;
 					 ++i, pos = (pos + 1) % QUEUE_LENGTH)
 				{
-					chunk_t *chunk = &h->buf[pos];
+					fifo_msg_t *chunk = &h->buf[pos];
 					if (chunk->hudev == hudev)
 					{
 						if (chunk->typ == PACKET_TYPE_PBA)
@@ -1645,7 +1873,7 @@ static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t 
 					// If this is an SBA, note it as the last one so far.  If
 					// it's a PBA, forget any previous SBA, since we don't want
 					// to overwrite an SBA followed by a PBA.
-					chunk_t *chunk = &h->buf[pos];
+					fifo_msg_t *chunk = &h->buf[pos];
 					if (chunk->hudev == hudev)
 					{
 						if (chunk->typ == PACKET_TYPE_SBA)
@@ -1658,7 +1886,7 @@ static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t 
 				// if we found a suitable queued SBA, replace it
 				if (last_sba_pos >= 0)
 				{
-					chunk_t *chunk = &h->buf[last_sba_pos];
+					fifo_msg_t *chunk = &h->buf[last_sba_pos];
 					memcpy(chunk->data, pdata, ndata);
 					combined = true;
 				}
@@ -1676,19 +1904,19 @@ static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t 
 			}
 			else
 			{
-				chunk_t * const pc = &h->buf[h->wpos];
+				fifo_msg_t * const pc = &h->buf[h->wpos];
 
-				if (hudev != NULL) {
+				if (hudev != NULL)
 					usbdev_addref(hudev);
-				}
 
 				pc->hudev = hudev;
+				if (psPico != nullptr) pc->psPico = *psPico;
 				pc->ndata = ndata;
 				pc->typ = typ;
+				pc->starting_port_num = starting_port_num;
 
-				if (pdata != NULL) {
+				if (pdata != NULL)
 					memcpy(&pc->data[0], pdata, ndata);
-				}
 
 				h->wpos = (h->wpos + 1) % QUEUE_LENGTH;
 				h->level += 1;
@@ -1699,28 +1927,25 @@ static size_t queue_push(HQUEUE hqueue, HUDEV hudev, packet_type_t typ, uint8_t 
 		}
 
 		// if the reader is blocked (because the queue was empty), signal that there is now data available
-
-		if (do_unblock) {
+		if (do_unblock)
 			SetEvent(h->hwevent);
-		}
 
-		if (!do_wait) {
+		if (!do_wait)
 			return ndata;
-		}
 
 		// if we are here, the queue is full and we have to wait until the consumer reads something
-
 		WaitForSingleObject(h->hrevent, INFINITE);
 	}
 }
 
-static size_t queue_shift(HQUEUE hqueue, HUDEV *phudev, uint8_t *pbuffer, size_t nsize)
+static size_t queue_shift(HQUEUE hqueue, packet_type_t &packet_type,
+	HUDEV *phudev, std::shared_ptr<PinscapePico::FeedbackControllerInterface> &psPico,
+	int &starting_port_num, uint8_t *pbuffer, size_t nsize)
 {
 	queue_t * const h = (queue_t*)hqueue;
 
-	if (phudev == NULL || pbuffer == NULL || nsize == 0 || nsize < sizeof(h->buf[0].data)) {
+	if (phudev == NULL || pbuffer == NULL || nsize == 0 || nsize < sizeof(h->buf[0].data))
 		return 0;
-	}
 
 	for (;;)
 	{
@@ -1729,44 +1954,44 @@ static size_t queue_shift(HQUEUE hqueue, HUDEV *phudev, uint8_t *pbuffer, size_t
 		size_t nread = 0;
 
 		// check if there is some data to read from the queue
-
 		{
 			AUTOLOCK(h->cs);
 
-			if (h->state != 0) {
+			if (h->state != 0)
 				return 0;
-			}
 
 			if (h->level <= 0)
 			{
 				h->rblocked = true;
 				do_wait = true;
 
-				if (h->eblocked) {
+				if (h->eblocked)
 					SetEvent(h->heevent);
-				}
 			}
 			else
 			{
-				chunk_t * const pc = &h->buf[h->rpos];
+				fifo_msg_t *pc = &h->buf[h->rpos];
 
+				// transfer the device handle
 				*phudev = pc->hudev;
 				pc->hudev = NULL;
 
+				// transfer the Pinscape Pico handle
+				psPico = pc->psPico;
+				pc->psPico.reset();
+
+				packet_type = pc->typ;
+				starting_port_num = pc->starting_port_num;
+
 				if (pc->ndata > 0) 
-				{
 					memcpy(pbuffer, &pc->data[0], pc->ndata);
-				}
 				else 
-				{
 					h->state = 1; 
-				}
 
 				nread = pc->ndata;
 
 				h->rpos = (h->rpos + 1) % QUEUE_LENGTH;
 				h->level -= 1;
-
 
 				h->rblocked = false;
 				do_unblock = h->wblocked;
@@ -1774,17 +1999,13 @@ static size_t queue_shift(HQUEUE hqueue, HUDEV *phudev, uint8_t *pbuffer, size_t
 		}
 
 		// if the writer is blocked (because the queue was full), signal that there is now some free space
-
-		if (do_unblock) {
+		if (do_unblock)
 			SetEvent(h->hrevent);
-		}
 
-		if (!do_wait) {
+		if (!do_wait)
 			return nread;
-		}
 
 		// if we are here, the queue is empty and we have to wait until the producer writes something
-
 		WaitForSingleObject(h->hwevent, INFINITE);
 	}
 }

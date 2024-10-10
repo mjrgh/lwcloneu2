@@ -50,7 +50,7 @@ typedef struct {
 	LONG refcount;
 
 	// The firmware in real LedWiz units seems to have a serious bug
-	// in its USB interface that allows an incoming packet to overwite
+	// in its USB interface that allows an incoming packet to overwrite
 	// the previous packet while the previous packet is still being
 	// decoded.  The bug is triggered if writes are sent too quickly.
 	// It manifests as output ports being set to random brightness
@@ -77,7 +77,7 @@ typedef struct {
 	// USB is such a black box that it's easy to think this is just
 	// some general USB flakiness, but it can easily be shown that
 	// it's not, such as by comparing Pinscape unit behavior.  The
-	// known emulators don't have the bug and dno't need the delay.
+	// known emulators don't have the bug and don't need the delay.
 	// We therefore allow the caller to set/ the timing per device,
 	// in case it wants to look at the USB HID descriptors to
 	// determine exactly what kind of physical device we're

@@ -4,8 +4,16 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 VisualStudioVersion = 17.11.35222.181
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ledwiz", "driver\build\vs_2022\ledwiz.vcxproj", "{255DA939-7CAD-4705-A71E-DCCE0FD0FA84}"
+	ProjectSection(ProjectDependencies) = postProject
+		{E9CE623B-BA52-400B-8358-8561FB5095FE} = {E9CE623B-BA52-400B-8358-8561FB5095FE}
+	EndProjectSection
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "testapp", "testapp\build\vs_2022\testapp.vcxproj", "{2A6C8427-1CFF-448B-AB3E-0B91BB08FE4A}"
+	ProjectSection(ProjectDependencies) = postProject
+		{255DA939-7CAD-4705-A71E-DCCE0FD0FA84} = {255DA939-7CAD-4705-A71E-DCCE0FD0FA84}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "PinscapePicoAPI", "driver\src\PinscapePico\WinAPI\PinscapePicoAPI.vcxproj", "{E9CE623B-BA52-400B-8358-8561FB5095FE}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -31,8 +39,19 @@ Global
 		{2A6C8427-1CFF-448B-AB3E-0B91BB08FE4A}.Release|Win32.Build.0 = Release|Win32
 		{2A6C8427-1CFF-448B-AB3E-0B91BB08FE4A}.Release|x64.ActiveCfg = Release|x64
 		{2A6C8427-1CFF-448B-AB3E-0B91BB08FE4A}.Release|x64.Build.0 = Release|x64
+		{E9CE623B-BA52-400B-8358-8561FB5095FE}.Debug|Win32.ActiveCfg = Debug|Win32
+		{E9CE623B-BA52-400B-8358-8561FB5095FE}.Debug|Win32.Build.0 = Debug|Win32
+		{E9CE623B-BA52-400B-8358-8561FB5095FE}.Debug|x64.ActiveCfg = Debug|x64
+		{E9CE623B-BA52-400B-8358-8561FB5095FE}.Debug|x64.Build.0 = Debug|x64
+		{E9CE623B-BA52-400B-8358-8561FB5095FE}.Release|Win32.ActiveCfg = Release|Win32
+		{E9CE623B-BA52-400B-8358-8561FB5095FE}.Release|Win32.Build.0 = Release|Win32
+		{E9CE623B-BA52-400B-8358-8561FB5095FE}.Release|x64.ActiveCfg = Release|x64
+		{E9CE623B-BA52-400B-8358-8561FB5095FE}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {35378B8F-2659-4B3A-811D-0DE2C4FB99AA}
 	EndGlobalSection
 EndGlobal

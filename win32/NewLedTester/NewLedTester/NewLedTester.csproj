@@ -156,8 +156,8 @@
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
-    <PostBuildEvent>xcopy /y /d /-i "$(SolutionDir)..\bin\win32\$(Configuration)\ledwiz.dll" .\ledwiz.dll
-xcopy /y /d /-i "$(SolutionDir)..\bin\x64\$(Configuration)\ledwiz.dll" .\ledwiz64.dll
+    <PostBuildEvent>xcopy /y /d /-i "$(SolutionDir)..\win32\$(Configuration)\ledwiz.dll" .\ledwiz.dll
+xcopy /y /d /-i "$(SolutionDir)..\x64\$(Configuration)\ledwiz.dll" .\ledwiz64.dll
 </PostBuildEvent>
   </PropertyGroup>
   <PropertyGroup>

@@ -52,12 +52,12 @@ static void CALLBACK notify_cb(int32_t reason, LWZHANDLE hlwz)
 
 		g_main.fn.LWZ_REGISTER(hlwz, g_main.hwnd);
 
-		// switch on all LEDs and set brightness to '30'
-
+		// switch on all LEDs
 		g_main.fn.LWZ_SBA(hlwz, 0xFF, 0xFF, 0xFF, 0xFF, 2);
 
+		// set all LED brightness to 129 (sawtooth)
 		uint8_t mode[32];
-		memset(&mode, 30, sizeof(mode));
+		memset(&mode, 129, sizeof(mode));
 		g_main.fn.LWZ_PBA(hlwz, mode);
 	}
 	else if (reason == LWZ_REASON_DELETE)
