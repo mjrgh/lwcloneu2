@@ -1198,7 +1198,7 @@ namespace PinscapePico
                 uint8_t cpuVersion;         // Pico RP2040 CPU version (1 for B0/B1, 2 for B2)
                 uint8_t romVersion;         // Pico ROM version (1 for B0, 2 for B1, 3 for B2)
                 uint8_t xinputPlayerIndex;  // player index for the XInput interface; 0xFF if unknown/inactive
-                uint8_t ledWizUnitNum;      // LedWiz emulation unit number, 1-16, or 0 if LedWiz emulation is disabled for the devices
+                uint16_t ledWizUnitMask;    // LedWiz emulation unit mask; the low-order bit enables unit #1, next bit enables unit #2, etc
             } __PackedEnd id;
 
             // Checksum, for CMD_CONFIG + SUBCMD_CONFIG_TEST_CHECKSUM.

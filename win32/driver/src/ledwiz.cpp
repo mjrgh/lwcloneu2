@@ -1481,19 +1481,23 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 		// add each LedWiz-enabled Pico
 		for (auto &pico : picos)
 		{
-			// if the desired LedWiz unit number is non-zero, LedWiz emulation is 
-			// enabled and the device has at least one logical output port
-			if (pico.ledWizUnitNum != 0 && pico.numOutputPorts != 0)
-			{
-				// it's enabled
-				LOG(LOGLEVEL_NORMAL, ". Found Pinscape Pico unit #%d (%s, HWID %s), virtual LedWiz unit #%d, %d ports\n",
-					pico.unitNum, pico.unitName.c_str(), pico.hwId.ToString().c_str(), pico.ledWizUnitNum, pico.numOutputPorts);
+			// enable it if it has a non-zero unit mask (allowing us to assign at
+			// least one unit number) and it has any output ports
+			bool enabled = pico.ledWizUnitMask != 0 && pico.numOutputPorts != 0;
 
+			// log it
+			LOG(LOGLEVEL_NORMAL, ". Found Pinscape Pico unit #%d (%s, HWID %s), virtual LedWiz mask %04x, %d ports%s\n",
+				pico.unitNum, pico.unitName.c_str(), pico.hwId.ToString().c_str(), pico.ledWizUnitMask, pico.numOutputPorts,
+				pico.ledWizUnitMask, enabled ? "" : " (disabled)");
+		
+			// proceed if it's enabled
+			if (enabled)
+			{
 				// open the interface
 				std::shared_ptr<PinscapePico::FeedbackControllerInterface> fci(PinscapePico::FeedbackControllerInterface::Open(pico));
 				if (fci == nullptr)
 				{
-					LOG(LOGLEVEL_NORMAL, ". Unable to open feedback controller interface\n");
+					LOG(LOGLEVEL_NORMAL, ".. Unable to open feedback controller interface\n");
 					continue;
 				}
 
@@ -1510,10 +1514,22 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 				_snprintf_s(baseName, _TRUNCATE, "Pinscape Pico #%d (%s)", pico.unitNum, pico.unitName.c_str());
 
 				// populate one virtual LedWiz unit per 32 output ports
-				for (int devIndex = pico.ledWizUnitNum - 1, basePortNum = 1 ; 
+				for (int devIndex = 0, baseUnitNum = -1, basePortNum = 1 ; 
 					basePortNum <= pico.numOutputPorts && devIndex < 16 ;
 					++devIndex, basePortNum += 32)
 				{
+					// find the next available unit number
+					for (; devIndex < 16 && (pico.ledWizUnitMask & (1 << devIndex)) == 0 ; ++devIndex);
+					if (devIndex >= 16)
+					{
+						LOG(LOGLEVEL_NORMAL, ".. No more unit numbers are enabled in the unit mask; skipping remaining unit(s)\n");
+						break;
+					}
+
+					// if this is the first unit, assign the base unit number
+					if (baseUnitNum < 0)
+						baseUnitNum = devIndex;
+
 					// only populate the virtual device if it's not already occupied
 					auto &d = h->devices[devIndex];
 					if (d.device_type == LWZ_DEVICE_TYPE_NONE)
@@ -1523,7 +1539,7 @@ static void lwz_refreshlist_attached(lwz_context_t *h)
 
 						// add the device
 						d.device_type = LWZ_DEVICE_TYPE_PINSCAPE_PICO;
-						d.ps_info.base_unit = pico.ledWizUnitNum - 1;
+						d.ps_info.base_unit = baseUnitNum;
 						d.ps_info.first_port_num = basePortNum;
 						d.num_outputs = lastPortNum - basePortNum + 1;
 

@@ -57,7 +57,7 @@ namespace PinscapePico
 		// and to open a live USB connection to the device.
 		struct Desc
 		{
-			Desc(int unitNum, const char *unitName, int ledWizUnitNum, const uint8_t *hwId,
+			Desc(int unitNum, const char *unitName, uint16_t ledWizUnitMask, const uint8_t *hwId,
 				const WCHAR *path, int numPorts, int plungerType, 
 				const VendorInterfaceDesc &vendorIfcDesc);
 
@@ -83,22 +83,27 @@ namespace PinscapePico
 			// it's mostly just to serve as a friendly name in lists.
 			std::string unitName;
 
-			// LedWiz unit number.  This is the unit number the device
-			// wishes to use (per its JSON configuration) for PC-side
-			// LedWiz emulation.  Pinscape Pico doesn't emulate the
-			// LedWiz's USB protocol, so it can't be accessed from
-			// legacy LedWiz-aware applications that use the protocol
-			// to access devices, but virtually no such applications
-			// exist anyway; instead, legacy LedWiz-aware applications
-			// nearly all access the device through Groovy Game Gear's
-			// official public C function-call API, provided through 
-			// the LEDWIZ.DLL that they supplied with the device.  We
-			// can therefore implement LedWiz emulation for legacy
-			// applications through a replacement LEDWIZ.DLL that uses
-			// the Pinscape Pico private protocols and exposes the same
-			// public C API to applications.  Such a replacement DLL
+			// LedWiz unit mask.  This is a bit mask of the unit IDs
+			// set in the JSON configuration.  Each bit corresponds
+			// to a virtual LedWiz unit number, with the low-order
+			// bit corresponding to unit #1, the next bit #2, and so
+			// on up to bit 0x8000 for unit #16.  Each '1' bit means
+			// that the corresponding unit number can be assigned to
+			// a virtual LedWiz on the host.  Unit numbers are to be
+			// assigned sequentially starting at the lowest numbered
+			// unit in the mask.
+			// 
+			// Pinscape Pico doesn't emulate the LedWiz's USB protocol,
+			// but that's not necessary to work with legacy LedWiz-aware
+			// applications, because the public API to the device was
+			// always provided through the LEDWIZ.DLL library provided
+			// by the manufacturer.  It's sufficient to replace the DLL
+			// with a custom version that presents the public API and
+			// uses our private protocol to communicate with the device.
+			// A replacement DLL that works with Pinscape Pico, as well
+			// Pinscape KL25Z, genuine LedWiz devices, and many clones,
 			// is available at https://github.com/mjrgh/lwcloneu2/.
-			int ledWizUnitNum;
+			uint16_t ledWizUnitMask = 0;
 
 			// Pico hardware ID.  This is a unique 64-bit identifier
 			// assigned at the factory and programmed into ROM on the
@@ -364,7 +369,8 @@ namespace PinscapePico
 			uint8_t hwid[8];          // Pico hardware ID (opaque 64-bit unique identifier embedded in hardware ROM)
 			uint16_t numPorts;        // number of configured logical output ports
 			uint16_t plungerType;     // plunger type (PinscapePico::FeedbackControllerReport::PLUNGER_xxx)
-			uint8_t ledWizUnitNum;    // LedWiz unit number
+			uint16_t ledWizUnitMask;  // LedWiz unit mask (each bit represents a virtual LedWiz unit number, 
+									  // starting at unit #1 for the low-order bit)
 		};
 		bool Decode(IDReport &id, const FeedbackReport &rpt);
 

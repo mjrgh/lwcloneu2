@@ -137,50 +137,46 @@ namespace PinscapePico
 		// is the ID that DOF uses.
 		int unitNum = -1;
 
-		// LedWiz emulation unit number, 1-16, or 0 to disable.
-		// This is the nominal unit number that should be assigned
-		// to this device by a host-side LedWiz emulation layer,
-		// typically implemented on Windows as a replacement DLL
-		// for the original LEDWIZ.DLL supplied by Groovy Game Gear.
-		// Pinscape Pico doesn't implement the LedWiz's custom USB 
-		// HID protocol, so it doesn't emulate an LedWiz for the 
-		// purposes of programs that access the device directly
-		// through its USB interface.  However, Groovy Game Gear
-		// deliberately left the USB interface undocumented, and
-		// instead published an in-process C function-call API 
-		// through a DLL they supplied, called LEDWIZ.DLL, which
-		// was explicitly designated as the public interface to
-		// the device.  Nearly all LedWiz-aware applications
-		// therefore access the device through the DLL, hence it's
-		// possible to implement LedWiz emulation purely through a
-		// replacement DLL, without any need to replicate the USB
-		// protocol.  A replacement DLL implementing Pinscape Pico
-		// access (as well as access to genuine LedWiz devices) is 
-		// available at https://github.com/mjrgh/lwcloneu2/
+		// LedWiz emulation unit mask.  This is a mask of the LedWiz
+		// unit numbers that an LedWiz emulator DLL on the PC should
+		// assign to virtual LedWiz units it creates to represent
+		// the Pinscape Pico's output ports.  Each bit in the mask
+		// enables the corresponding virtual unit number, where the
+		// low-order bit corresponds to virtual unit #1, and bits
+		// are assigned sequentially from there, until unit #16 at
+		// bit 0x8000.
+		//
+		// Pinscape Pico doesn't implement the LedWiz's custom USB
+		// HID protocol, so it can't be accessed directly from
+		// software that works through the LedWiz HID interface.
+		// However, the HID protocol was never intended to be the
+		// application interface, since Groovy Game Gear never
+		// documented it.  Instead, applications were always meant
+		// to access the device through the C function-call API
+		// implemented through the LEDWIZ.DLL library provided by
+		// Groovy Game Gear.  That was was always the officially
+		// designated public API.  That makes it possible for us
+		// to implement LedWiz emulation purely through a custom
+		// replacement for that DLL, without any need to replicate
+		// the USB protocol.  A replacement DLL implementing
+		// Pinscape Pico access (as well as access to genuine
+		// LedWiz devices and other clone devices) is available at
+		// https://github.com/mjrgh/lwcloneu2/
 		// 
-		// This LedWiz unit number property is a helper for the
-		// emulation DLL, telling the DLL the desired unit number 
-		// to assign to the virtual LedWiz unit that the DLL creates 
-		// to represent the Pico, per the Pico's JSON configuration.
+		// This LedWiz unit mask is a helper for the emulation DLL,
+		// telling the DLL the desired unit numbers to assign to 
+		// the virtual LedWiz units that the DLL creates to represent
+		// the Pico, per the Pico's JSON configuration.
 		// 
 		// A single Pico might actually need multiple LedWiz unit
 		// numbers, since a single LedWiz unit can only represent
 		// 32 output ports; a Pico with more than 32 logical output
 		// ports thus requires two or more virtual LedWiz units to
-		// represent it through the LedWiz API.  Our convention is
-		// that the emulation layer will assign consecutive unit
-		// numbers starting at the number given here; for example,
-		// if the Pico has 96 output ports, requiring three virtual
-		// LedWiz units to represent it, and the value here is 8,
-		// the virtual LedWiz's are assigned unit numbers 8, 9, 
-		// and 10.
-		//
-		// We initialize this to -1 to indicate that no value was
-		// read from the device.  The device reports a value of 0
-		// to mean that LedWiz emulation should be disabled for the
-		// device; otherwise, the value is 1 to 16, corresponding
-		// to LedWiz USB VID/PID values of FAFA/00F0 through 00FF.
-		int ledWizUnitNum = -1;
+		// represent it through the LedWiz API.  The emulator should
+		// assign unit numbers starting at the least significant bit
+		// position in the mask containing a '1' bit, adding
+		// sequentially higher numbered units as needed.
+		int ledWizUnitMask = 0;
 
 		// XInput interface Player Number.  This is the player index
 		// assigned by the host to the Pinscape device's virtual XBox

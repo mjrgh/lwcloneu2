@@ -462,7 +462,7 @@ namespace PinscapePico
         // IDENTIFICATION REPORT
         // <0x01:BYTE> <UnitNumber:BYTE> <UnitName:CHAR[32]> <ProtocolVer:UINT16>
         //   <HardwareID:BYTE[8]> <NumPorts:UINT16> <PlungerType:UINT16>
-        //   <LedWizUnitNum:BYTE>
+        //   <LedWizUnitMask:UINT16>
         //
         // This report is sent to the host in response to a REQ_QUERY_ID
         // command.  The arguments provide the host with identifying
@@ -474,7 +474,7 @@ namespace PinscapePico
         // <NumPorts>       = the number of output ports currently configured
         // <PlungerType>    = plunger sensor type code; one of the PLUNGER_xxx constants below
         // <HardwareID>     = the Pico's unique 64-bit hardware ID, as an array of 8 bytes
-        // <LedWizUnitNum>  = the LedWiz unit number to use for PC-side LedWiz emulation, 1-16, or 0 to disable
+        // <LedWizUnitMask> = mask of unit numbers to assign as virtual LedWiz units
         //
         // The Unit Number is a small integer (typically starting at 1 for
         // the first Pinscape unit in a system, and numbered sequentially
@@ -529,6 +529,20 @@ namespace PinscapePico
         // application's perspective, only the logical (configured)
         // ports are directly addressable, so that's what this number
         // represents.
+        //
+        // The LedWiz Unit Mask is a mask of desired unit numbers that an
+        // LedWiz emulator DLL on the PC side should assign to this device
+        // to create a collection of virtual LedWiz units for use by legacy
+        // software based on the LEDWIZ.DLL public API.  The low-order bit
+        // (0x0001) corresponds to unit #1, bit 0x0002 is unit #2, bit 0x0004
+        // is unit #3, and so on, up to 0x8000 for unit #16.  The emulator
+        // DLL should start at the lowest unit number in the mask, and assign
+        // additional units as needed.  For example, if the mask is 0xFFF0,
+        // the first virtual unit should be assigned as #5, the second as #6,
+        // etc.  The reason that we use a mask instead of just giving the
+        // unit number directly is that the emulator will have to create more
+        // than one virtual LedWiz if the Pico has more than 32 output ports
+        // configured, since each LedWiz can only represent 32 ports.
         static const int RPT_ID = 0x01;
 
         // plunger type codes

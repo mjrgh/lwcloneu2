@@ -63,10 +63,10 @@ const char *FeedbackControllerInterface::Desc::GetPlungerTypeName(uint16_t typeC
 }
 
 FeedbackControllerInterface::Desc::Desc(
-	int unitNum, const char *unitName, int ledWizUnitNum,
+	int unitNum, const char *unitName, uint16_t ledWizUnitMask,
 	const uint8_t *hwId, const WCHAR *path, int numPorts, int plungerType,
 	const VendorInterfaceDesc &vendorIfcDesc) :
-	unitNum(unitNum), unitName(unitName), ledWizUnitNum(ledWizUnitNum), hwId(hwId),
+	unitNum(unitNum), unitName(unitName), ledWizUnitMask(ledWizUnitMask), hwId(hwId),
 	path(path), numOutputPorts(numPorts), plungerType(plungerType),
 	vendorIfcDesc(vendorIfcDesc)
 {
@@ -247,7 +247,7 @@ HRESULT FeedbackControllerInterface::Enumerate(std::list<Desc> &units)
 					if (f.Query(FeedbackRequest{ FeedbackRequest::REQ_QUERY_ID }, id, 100))
 					{
 						// success - add the unit to the result list
-						units.emplace_back(id.unitNum, id.unitName, id.ledWizUnitNum,
+						units.emplace_back(id.unitNum, id.unitName, id.ledWizUnitMask,
 							id.hwid, diDetail->DevicePath, id.numPorts, id.plungerType,
 							itVendorIfc->desc);
 					}
@@ -711,7 +711,7 @@ bool FeedbackControllerInterface::Decode(IDReport &id, const FeedbackReport &rpt
 	GetBytes(p, id.hwid, 8);
 	id.numPorts = GetUInt16(p);
 	id.plungerType = GetUInt16(p);
-	id.ledWizUnitNum = *p++;
+	id.ledWizUnitMask = GetUInt16(p);
 	return true;
 }
 

@@ -683,7 +683,7 @@ int VendorInterface::QueryID(DeviceID &id)
 		id.xinputPlayerIndex = reply.args.id.xinputPlayerIndex != 0xFF ? reply.args.id.xinputPlayerIndex : -1;
 
 		// set the LedWiz unit number
-		id.ledWizUnitNum = reply.args.id.ledWizUnitNum;
+		id.ledWizUnitMask = reply.args.id.ledWizUnitMask;
 
 		// set the unit name from the transfer data
 		if (xferIn.size() >= 32)
