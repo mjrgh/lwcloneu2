@@ -1,5 +1,5 @@
 // Pinscape Pico - Vendor Interface API
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024 Michael J Roberts / BSD-3-Clause license, 2025 / NO WARRANTY
 //
 // This module implements an API for interacting with the Pinscape
 // Pico device via its USB Vendor Interface.  This interface provides
@@ -10,12 +10,12 @@
 // To access the vendor interface, the first step is to enumerate
 // available devices:
 // 
-//    std::list<PinscapePico::VendorInterface::VendorInterfaceDesc> devices;
+//    std::list<PinscapePico::VendorInterfaceDesc> devices;
 //    HRESULT hr = PinscapePico::VendorInterface::EnumerateDevices(devices);
 //    if (SUCCEEDED(hr))
 //       ...
 //
-// Now you can open a device from the path list:
+// Now you can open a device from the enumeration list:
 // 
 //    PinscapePico::VendorInterface *vi = nullptr;
 //    hr = devices.front().Open(vi);
@@ -118,6 +118,7 @@
 #include <Windows.h>
 #include <winusb.h>
 #include <usb.h>
+#include "Utilities.h"
 #include "PinscapePicoAPI.h"
 
 namespace PinscapePico
@@ -149,18 +150,37 @@ namespace PinscapePico
 		// encapsulates a device object and a mutex, which can be locked
 		// before accessing the device to protect against concurrent
 		// access from other threads.
+		//
+		// In addition, the object can optionally store an HWND for a
+		// Window registered to receive device-change notifications for
+		// the device via RegisterDeviceNotification().
 		class Shared
 		{
 		public:
 			Shared() { }
-			Shared(VendorInterface *device) : device(device) { }
-			virtual ~Shared() { CloseHandle(mutex); }
+			virtual ~Shared();
+
+			// Construct with a device object and notifier window.
+			// If the window is non-null, we'll register it for device
+			// notifications via RegisterDeviceNotification().
+			Shared(VendorInterface *device, HWND hwndNotify);
 
 			// the underlying device
 			std::unique_ptr<VendorInterface> device;
+			
+			// notifier window and registration handle
+			HWND hwndNotify = NULL;
+			HANDLE deviceNotifyHandle = NULL;
 
 			// get the underlying device pointer
 			VendorInterface *Get() { return device.get(); }
+
+			// set the underlying device pointer and notifier window
+			void Set(VendorInterface *ifc, HWND hwndNotify);
+
+			// Register/unregister the current notify window
+			void RegisterNotify();
+			void UnregisterNotify();
 
 			// Lock the mutex with the given timeout.  Returns true
 			// if the mutex was successfully acquired, false if not.
@@ -231,6 +251,29 @@ namespace PinscapePico
 		// if the operation was successful.
 		static HRESULT EnumerateDevices(std::list<VendorInterfaceDesc> &deviceList);
 
+		// Filter a device list by identification string.  The ID can
+		// be given as a unit number, unit name, or hardware ID (in
+		// hexadecimal string format).
+		// 
+		// If we find any exact matches for any of those interpretations
+		// of the ID string, we'll filter for the exact matches ONLY.
+		// If there aren't any exact matches, though, we'll filter for
+		// devices where the ID matches any SUBSTRING of the hardware
+		// ID, as long as the ID string is at least four characters
+		// long.  This allows the user to select a device by a short
+		// but unique fragment of the hardware ID - usually it just
+		// takes the first few or last few hex digits of the hardware
+		// ID to uniquely identify a unit.  We ignore these fragment
+		// matches in the case of any unique match to unit number or
+		// name, however, so that unit names that just happen to look
+		// like short hex strings won't be treated as ambiguous with
+		// hardware IDs.
+		// 
+		// Populates the match list with descriptors matching the ID
+		// string.  If the ID is null or empty, we simply return all
+		// active devices.
+		static HRESULT EnumerateDevicesByID(std::list<VendorInterfaceDesc> &matchList, const char *id);
+
 		// Open a device by its hardware ID.  Returns S_OK on success,
 		// S_FALSE if no match was found, or an HRESULT error if another
 		// error occurs.  Typename T can be a direct VendorInterface*,
@@ -262,6 +305,9 @@ namespace PinscapePico
 		static HRESULT Open(VendorInterface* &device, IDMatchFunc match);
 		static HRESULT Open(std::unique_ptr<VendorInterface> &device, IDMatchFunc match);
 		static HRESULT Open(std::shared_ptr<VendorInterface> &device, IDMatchFunc match);
+
+		// Get the USB device serial number
+		const wchar_t *GetSerialNumber() const { return serialNum.c_str(); }
 
 		// Enumerate HID interfaces exposed by the Pinscape Pico device.
 		// This returns a list of file system paths representing the HID
@@ -351,6 +397,17 @@ namespace PinscapePico
 		// crashes.
 		int EnterSafeMode();
 
+		// Reboot the Pico without loading any settings.  This restarts
+		// the firmware with "factory" defaults for all settings.  This
+		// doesn't delete any of the settings files; it simply skips
+		// loading any of the available files.  On the next normal
+		// reboot, the existing settings file will be loaded as usual.
+		// This allows starting a session with default settings in place
+		// temporarily, for the duration of the session, without any
+		// permanent change to the settings files.
+		int EnterFactoryMode();
+
+
 		// Send an ENTER BOOT LOADER command to the device.  This resets
 		// the Pico into its ROM boot loader mode.  The USB connection
 		// will be dropped when the device resets, so the current handle
@@ -376,7 +433,7 @@ namespace PinscapePico
 		// wipe of the Pico.)
 		//
 		// If you want to delete the JSON configuration file only,
-		// use EraseConfig().  That removes the user settings but
+		// use EraseConfig().  That removes the user settings, but
 		// preserves internal persistent data, such as calibration
 		// data.
 		//
@@ -411,7 +468,7 @@ namespace PinscapePico
 		// Check if a config file exists.  Returns PinscapeResponse::OK
 		// if the file exists, ERR_NOT_FOUND if it doesn't exist.  Other
 		// error codes can be returned if the request itself fails.
-		int ConfigFileExists(uint8_t fileID, bool &exists);
+		int QueryConfigFileExists(uint8_t fileID, bool &exists);
 
 		// Set the wall clock time on the Pico.  This sends the local
 		// system time to the Pico as a reference point for its clock,
@@ -425,7 +482,92 @@ namespace PinscapePico
 		int QueryStats(PinscapePico::Statistics *stats, size_t sizeofStats,
 			bool resetCounters);
 
-		// Query the USB interface configuration.
+		// Synchronize clocks with the Pico.  This uses the USB SOF (Start
+		// Of Frame) signal to create a fixed reference point in time shared
+		// between the Windows host and the Pico, so that the two systems
+		// can translate event times between their two clocks with high
+		// precision.
+		// 
+		// On success, picoClockOffset is filled in with the time offset
+		// between the Pico's system clock and the Windows high-precision
+		// QueryPerformanceCounter() clock, in microseconds, such that
+		// you can calculate the Pico clock time corresponding to any
+		// given Windows clock time as:
+		//
+		//   T[Pico] = T[Windows] + picoClockOffset
+		// 
+		// The clock synchronization offset varies over time, because the
+		// Pico and Windows clocks are based on independent frequency
+		// generators, so the two clocks drift from real time at
+		// different rates that are unpredictable.  The Pico clock's rated
+		// accuracy is about 30 ppm, so it can drift by up to 0.1 seconds
+		// per hour, or 2.5 seconds per day.  The client should therefore
+		// refresh the offset from time to time, according to how much
+		// precision it needs.  For millisecond-scale measurements, you
+		// should refresh about once a minute.
+		// 
+		// Before using this function, clock synchronization must be
+		// explicitly enabled via EnableClockSync().  The clock sync feature
+		// adds some run-time overhead on both host and Pico, so it's
+		// disabled by default.
+		//
+		// Returns the usual status code (OK or ERR_xxx).
+		int SynchronizeClocks(int64_t &picoClockOffset);
+
+		// Enable/disable time sync.  Clock synchronization adds a small
+		// amount of run-time overhead on both the host and the Pico, since
+		// each system must keep track of USB hardware frame times, so the
+		// synchronization system is disabled by default to eliminate that
+		// overhead for clients that don't need it.
+		int EnableClockSync(bool enable);
+
+		// Query the Pico system clock time, for synchronizing between Pico
+		// timestamps and Windows timestamps.
+		// 
+		// On success, the values w1..p1..p2..w2 provide timestamps before
+		// and after the request.  The 'w' values are the Windows times,
+		// expressed in QueryPerformanceCounter ticks, and the 'p' values
+		// are Pico timestamps, expressed in microseconds since the last
+		// Pico CPU reset:
+		// 
+		//   w1 = Windows timestamp just before sending the USB request
+		//   p1 = Pico timestamp upon receiving the request
+		//   p2 = Pico timestamp just before sending the reply
+		//   w2 = Windows timestamp upon receiving the reply
+		// 
+		// Because of the order of events, the following relationship
+		// between these timestamps must hold, when they're all expressed
+		// in common units with reference to a common epoch:
+		// 
+		//   w1 < p1 < p2 < w2
+		// 
+		// This relationship allows the host to determine the correspondence
+		// between a given Windows timestamp and a given Pico timestamp to
+		// the precision of the time windows, since we know for sure that
+		// Pico timestamps in the interval [p1..p2] are fully enclosed within
+		// the same real-time interval as the Windows timestamp interval
+		// [w1..w2].  For more precise results, the caller should make
+		// repeated calls, and use the result with the shortest Windows
+		// interval, since this constrains the correspondence to the smallest
+		// uncertainty range.  To improve results further, the caller should
+		// take an average of several such shortest-window results, since
+		// averaging will cancel out the random noise in individual samples.
+		// 
+		// The Windows and Pico clocks are independent, obviously, so they
+		// will typically exhibit some skew.  This will make projections
+		// of Pico times from Windows times increasingly inaccurate as the
+		// elapsed time from the reference reading increases.  You can
+		// correct for skew by taking readings at extended intervals and
+		// using the ratio between the projected Pico time and the actual
+		// observed Pico time as a correction factor.  Experimentally, the
+		// skew is about one part per million, so skew correction should
+		// be measured perhaps every few minutes for an extended session.
+		// 
+		// Returns the usual status code (OK or ERR_xxx).
+		int QueryPicoSystemClock(int64_t &w1, int64_t &w2, uint64_t &p1, uint64_t &p2);
+
+		// Query the USB interface configuration.  Returns a status code
+		// indicating success or failure.
 		int QueryUSBInterfaceConfig(PinscapePico::USBInterfaces *ifcs, size_t sizeofIfcs);
 
 		// Query the GPIO configuration
@@ -766,6 +908,44 @@ namespace PinscapePico
 		// button descriptors returned from QueryButtonConfig().
 		int QueryLogicalButtonStates(std::vector<BYTE> &states, uint32_t &shiftState);
 
+		// Query a GPIO button event log.  Buttons mapped to GPIO sources
+		// can be configured (in the JSON config file) to log the Pico
+		// microsecond clock time of each on/off transition on the GPIO
+		// pin.  GPIO inputs are uniquely suited for precise button event
+		// time measurement on the Pico because of their ability to
+		// generate CPU interrupts on voltage level changes, which the
+		// Pico can service with very low latency, on the order of 200ns.
+		// When a GPIO-source button is configured for event logging,
+		// Pinscape uses an interrupt handler to collect a timestamp on
+		// the Pico microsecond clock for each change in the logic level
+		// input on the button's input GPIO pin.  This request retrieves
+		// the log  of recent events for a given GPIO, allowing a Windows
+		// program to correlate physical changes in the button state with
+		// the corresponding HID reports received on the host.  This in
+		// turn can be used to measure the latency between a physical
+		// button press and the HID input reaching the pinball simulator
+		// on the PC side.  (Computing times between Pico and Windows
+		// events requires a common clock reference point, which can be
+		// obtained via QueryPicoSystemClock().)
+		// 
+		// Returns a status code (OK or ERR_xxx).  On success, the event
+		// vector is populated with the most recent events for the GPIO,
+		// ordered from oldest to newest.  Timestamps are in terms of the
+		// Pico's system clock, which reads in microseconds since the
+		// last Pico CPU reset.  The events returned are removed from
+		// the Pico's internal buffer, so each call only returns new
+		// events that occurred after the last call.  The Pico's buffer
+		// uses a fixed size; when the buffer is full, the oldest event
+		// is discarded to make room for each new event.  When the
+		// host application first starts, it will thus see the most
+		// recent events, no matter how long the Pico has been running.
+		int QueryButtonEventLog(std::vector<PinscapePico::ButtonEventLogItem> &events, int gpioNumber);
+
+		// Clear the GPIO button event log for a given GPIO.  This
+		// deletes all logged events on the Pico for the given GPIO.
+		// Passing gpioNumber == 255 clears the logs for all GPIOs.
+		int ClearButtonEventLog(int gpioNumber);
+
 		// Query the button states of the physical button input devices.
 		// Each function retrieves a byte vector giving the states of
 		// all of the input ports for the given device type.
@@ -799,9 +979,9 @@ namespace PinscapePico
 		// object.  For individually addressable chips (PCA9685, PCA9555,
 		// TLC59116), this is the output port number on the chip,
 		// starting with port 0.  For daisy-chained devices (TLC5940,
-		// 74HC595), this is the port number on the overall chain,
-		// starting at 0 for the first port on the first chip in the
-		// chain (the one directly connected to the Pico).  a
+		// TLC5947, 74HC595), this is the port number on the overall
+		// chain, starting at 0 for the first port on the first chip
+		// in the chain (the one directly connected to the Pico).
 		int SetPhysicalOutputPortLevel(
 			uint8_t deviceType, uint8_t configIndex,
 			uint8_t port, uint16_t pwmLevel);
@@ -812,7 +992,23 @@ namespace PinscapePico
 		// programs such as DOF can access via the USB Feedback
 		// Controller interface.  The JSON configuration defines the
 		// mapping between logical ports and physical devices.
+		//
+		// The vector is arranged in order of port numbers.  Note that
+		// the output ports are numbered following the DOF convention
+		// of starting at port #1, so the first port in the vector, at
+		// index [0], is nominally port #1.
 		int QueryLogicalOutputPortConfig(std::vector<PinscapePico::OutputPortDesc> &ports);
+
+		// Query a logical output port name.  This retrieves the
+		// user-assigned name for the port, set in the JSON
+		// configuration.  The name is an arbitrary label that
+		// can be used for configuration cross-references, and
+		// for easier port identification in UI port listings.
+		// Unnamed ports return an empty string.
+		//
+		// The port number is expressed in terms of the nominal
+		// DOF port numbering, starting at 1 for the first port.
+		int QueryLogicalOutputPortName(int portNum, std::string &name);
 
 		// Query the output device configuration.  Populates a
 		// vector of output device descriptors, providing the list
@@ -820,10 +1016,10 @@ namespace PinscapePico
 		// output ports.  The physical devices are the peripheral
 		// chips attached to the Pico that can be used to control
 		// external feedback devices: PWM controller chips (TLC5940,
-		// TLC59116, PCA9685), shift registers (74HC595), GPIO
-		// extenders (PCA9555).  Note that the logical output ports
-		// can also be mapped directly to Pico GPIO ports, but the
-		// device list returned here doesn't include an entry for
+		// TLC5947, TLC59116, PCA9685), shift registers (74HC595),
+		// GPIO extenders (PCA9555).  Note that the logical output
+		// ports can also be mapped directly to Pico GPIO ports, but
+		// the device list returned here doesn't include an entry for
 		// the GPIO ports, because those are a fixed feature of the
 		// Pico, so we normalize them out of the list.
 		int QueryOutputDeviceConfig(std::vector<PinscapePico::OutputDevDesc> &devices);
@@ -981,6 +1177,22 @@ namespace PinscapePico
 		// reset the pipes
 		void ResetPipes();
 
+		// Get the underlying device handle
+		HANDLE GetDeviceHandle() const { return hDevice; }
+
+		// Is the device handle valid?  This tests if the device has an
+		// open handle: the original creation succeeded, and the handle
+		// hasn't been explicitly closed.  This doesn't attempt any
+		// operations on the handle, so the handle might be open but no
+		// longer connected to the physical device, such as after the
+		// device has been unplugged.
+		bool IsDeviceHandleValid() const { return hDevice != NULL && hDevice != INVALID_HANDLE_VALUE; }
+
+		// Close the underlying device handle.  This can be used if the
+		// application receives notification that the device has been
+		// disconnected via WM_DEVICECHANGE.
+		void CloseDeviceHandle();
+
 		// WinUSB device interface GUID for the Pinscape Pico vendor interface.
 		// This is the custom GUID that the Pinscape firmware exposes via its
 		// USB MS OS descriptors, which tell Windows to allow WinUSB access to
@@ -1010,6 +1222,9 @@ namespace PinscapePico
 
 		// WinUSB handle to the device
 		WINUSB_INTERFACE_HANDLE winusbHandle = NULL;
+
+		// USB SOF time tracking handle
+		HANDLE timeTrackingHandle = NULL;
 
 		// File system path of the device
 		WSTRING path;
@@ -1053,5 +1268,59 @@ namespace PinscapePico
 			{ PinscapeResponse::Args::TVON::PWR_IRSENDING, "IR Sending" },
 			{ PinscapeResponse::Args::TVON::PWR_ON, "Power On" },
 		};
+
+		// Overlapped I/O tracker.  This encapsulates all of the resources
+		// associated with an overlapped read or write: the transfer buffer
+		// and the system OVERLAPPED struct.  These resources must remain
+		// valid until the I/O completes, so they must be heap-allocated,
+		// and can't be released until the OVERLAPPED event reports SET
+		// state.
+		struct IOTracker
+		{
+			IOTracker(VendorInterface *ifc, size_t bufSize) : 
+				ov(ifc->hDevice, ifc->winusbHandle)
+			{ 
+				buf.resize(bufSize); 
+			}
+
+			IOTracker(VendorInterface *ifc, const uint8_t *data, size_t dataSize) :
+				ov(ifc->hDevice, ifc->winusbHandle)
+			{
+				buf.resize(dataSize);
+				memcpy(buf.data(), data, dataSize);
+			}
+
+			// has the I/O completed?
+			bool IsCompleted() const { return WaitForSingleObject(ov.ov.hEvent, 0) == WAIT_OBJECT_0; }
+
+			// transfer buffer
+			std::vector<uint8_t> buf;
+
+			// OVERLAPPED struct
+			OVERLAPPEDHolder ov;
+		};
+
+		// Unresolved I/O transactions.  If an I/O times out, we'll
+		// throw it on this list, to keep the resources associated with
+		// the transaction alive until the I/O finally resolves, if it
+		// ever does.  The WinUsb driver doesn't support synchronous
+		// cancellation, so if we run out of time waiting for an I/O
+		// to complete, we can't abandon the resources associated with
+		// the I/O, because the WinUsb driver will retain pointers to
+		// the resources until the I/O resolves, and could write into
+		// that memory space at any time in the future.
+		std::list<std::unique_ptr<IOTracker>> timedOutIOs;
+
+		// next list cleanup time
+		UINT64 tCleanUpTimedOutIOs = 0;
+
+		// Try cleaning up the timed-out I/O list.  If 'now' is true,
+		// we'll do the clean up immediately, no matter how long it's
+		// been since the last pass.  Otherwise, we'll only attempt
+		// the cleanup periodically.
+		void CleanUpTimedOutIOs(bool now);
+
+		// Close the time-tracking handle
+		void CloseTimeTrackingHandle();
 	};
 }

@@ -1,5 +1,5 @@
 // Pinscape Pico - Feedback Device Controller HID Interface Protocol
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024 Michael J Roberts / BSD-3-Clause license, 2025 / NO WARRANTY
 //
 // This file defines the protocol for our Feedback Controller HID
 // interface.
@@ -83,8 +83,8 @@
 //
 // INTERFACE DISCOVERY
 //
-// On Windows, HID devices can be enumerated through the Setup API (the
-// Windows API documentation has examples).  However, since we use the
+// On Windows, HID devices can be enumerated through the Setup API; the
+// Windows API documentation has examples.  However, since we use the
 // generic "undefined" usage to describe the interface as a special-
 // purpose device with a custom report structure, it's possible that a
 // system-wide enumeration would find other, unrelated devices that
@@ -238,7 +238,7 @@ namespace PinscapePico
         //
 
         // INVALID/EMPTY REQUEST
-        // <0x00:BYTE)
+        // <0x00:BYTE>
         static const uint8_t REQ_INVALID = 0x00;
 
         // QUERY DEVICE IDENTIFICATION

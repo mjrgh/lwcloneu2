@@ -1,5 +1,5 @@
 // Pinscape Pico Device - Boot Loader interface
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024 Michael J Roberts / BSD-3-Clause license, 2025 / NO WARRANTY
 //
 // Implements helper functions for working with a Pico in its native
 // Boot Loader mode.  The Boot Loader is built into every Pico, in ROM
@@ -44,6 +44,7 @@
 #include <string>
 #include <regex>
 #include <algorithm>
+struct IUnknown;  // workaround for Microsoft SDK header bug when compiling with a Win 8.1 target
 #include <Windows.h>
 #include <shlwapi.h>
 #include <usb.h>
@@ -63,6 +64,9 @@
 #include "RP2BootLoaderInterface.h"
 
 using namespace PinscapePico;
+
+#pragma comment(lib, "shlwapi")
+#pragma comment(lib, "Shell32")
 
 // --------------------------------------------------------------------------
 //

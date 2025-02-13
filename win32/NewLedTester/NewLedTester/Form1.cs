@@ -62,7 +62,8 @@ namespace NewLedTester
                 // numbered 1-32.  If it's a Pinscape virtual LedWiz, though, it represents
                 // a group of high-numbered ports, which we can get from the name.
                 int basePort = 1;
-                if (deviceType == LedWizDLL.LWZ_DEVCIE_TYPE_PINSCAPE_VIRT)
+                if (deviceType == LedWizDLL.LWZ_DEVICE_TYPE_PINSCAPE_VIRT
+                    || deviceType == LedWizDLL.LWZ_DEVICE_TYPE_PINSCAPE_PICO)
                 {
                     Match m = Regex.Match(name, @"(?i)ports\s+(\d+)-(\d+)");
                     if (m.Success)
@@ -221,7 +222,7 @@ namespace NewLedTester
                 // set the panel height according to the contents
                 p.Height = ymax + 4;
                 int y = 0;
-                foreach (Device dev in form.devices)
+				foreach (Device dev in form.devices)
                 {
                     if (dev.unit < unit && dev.panel.Bottom > y)
                         y = dev.panel.Bottom;
@@ -240,6 +241,9 @@ namespace NewLedTester
 
                 // insert the new device object
                 form.devices.Add(newDev);
+
+                // sort by unit number
+                form.devices.Sort((a, b) => (int)a.unit - (int)b.unit);
 
                 // show the bar in all but the last panel
                 for (int i = 0 ; i < form.devices.Count ; ++i)

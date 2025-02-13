@@ -1,5 +1,5 @@
 // Pinscape Pico Device - Vendor Interface API
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024 Michael J Roberts / BSD-3-Clause license, 2025 / NO WARRANTY
 
 #include <stdlib.h>
 #include <stddef.h>
@@ -12,7 +12,9 @@
 #include <string>
 #include <regex>
 #include <algorithm>
+struct IUnknown;  // workaround for Microsoft SDK header bug when compiling with a Win 8.1 target
 #include <Windows.h>
+#include <ntverp.h>
 #include <shlwapi.h>
 #include <usb.h>
 #include <winusb.h>
@@ -25,6 +27,8 @@
 #include <SetupAPI.h>
 #include <shellapi.h>
 #include <winerror.h>
+#include <timeapi.h>
+#include <Dbt.h>
 #include "crc32.h"
 #include "BytePackingUtils.h"
 #include "Utilities.h"
@@ -48,22 +52,41 @@
 // this is all in the PinscapePico namespace
 using namespace PinscapePico;
 
+// Device ID name formatting
+std::string DeviceID::FriendlyBoardName() const
+{
+	// make a modifiable copy of the name
+	std::string name = targetBoardName;
+
+	// replace underscores with spaces, and capitalize each word
+	bool startOfWord = true;
+	for (char *p = name.data() ; *p != 0 ; ++p)
+	{
+		// capitalize the start of each word
+		if (startOfWord && islower(*p))
+		{
+			*p = toupper(*p);
+			startOfWord = false;
+		}
+
+		// replace underscores with spaces
+		if (*p == '_')
+			*p = ' ';
+
+		// start a word at a space
+		if (*p == ' ')
+			startOfWord = true;
+	}
+
+	// return the modified string
+	return name;
+}
+
 // Destruction
 VendorInterface::~VendorInterface()
 {
-	// close the WinUSB handle
-	if (winusbHandle != NULL)
-	{
-		WinUsb_Free(winusbHandle);
-		winusbHandle = NULL;
-	}
-
-	// close the file handle
-	if (hDevice != NULL && hDevice != INVALID_HANDLE_VALUE)
-	{
-		CloseHandle(hDevice);
-		hDevice = NULL;
-	}
+	// close the device handle
+	CloseDeviceHandle();
 }
 
 // Vendor Interface error code strings.  These correspond to the 
@@ -89,6 +112,7 @@ const char *VendorInterface::ErrorText(int status)
 		{ PinscapeResponse::ERR_BAD_REQUEST_DATA, "Data or format error in request" },
 		{ PinscapeResponse::ERR_BAD_REPLY_DATA, "Data or format error in reply" },
 		{ PinscapeResponse::ERR_NOT_FOUND, "File/object not found" },
+		{ PinscapeResponse::ERR_RETRY_OK, "Retry succeeded" },
 	};
 
 	// look up an existing message
@@ -108,7 +132,7 @@ const char *VendorInterface::ErrorText(int status)
 }
 
 // Open a device into a unique_ptr
-HRESULT VendorInterfaceDesc::Open(std::unique_ptr<VendorInterface> &pDevice)
+HRESULT VendorInterfaceDesc::Open(std::unique_ptr<VendorInterface> &pDevice) const
 {
 	// open the device through the naked pointer interface
 	VendorInterface *dev = nullptr;
@@ -123,7 +147,7 @@ HRESULT VendorInterfaceDesc::Open(std::unique_ptr<VendorInterface> &pDevice)
 }
 
 // Open a device into a shared_ptr
-HRESULT VendorInterfaceDesc::Open(std::shared_ptr<VendorInterface> &pDevice)
+HRESULT VendorInterfaceDesc::Open(std::shared_ptr<VendorInterface> &pDevice) const
 {
 	// open the device through the naked pointer interface
 	VendorInterface *dev = nullptr;
@@ -174,7 +198,7 @@ static HRESULT CONFIGRET_TO_HRESULT(CONFIGRET cres)
 }
 
 // Open a device
-HRESULT VendorInterfaceDesc::Open(VendorInterface* &device)
+HRESULT VendorInterfaceDesc::Open(VendorInterface* &device) const
 {
 	HandleHolder<HANDLE> hDevice(CreateFileW(
 		path.c_str(), GENERIC_WRITE | GENERIC_READ,
@@ -407,15 +431,16 @@ bool VendorInterfaceDesc::GetCDCPort(TSTRING &name) const
 			SPDRP_FRIENDLYNAME, 0L, reinterpret_cast<PBYTE>(friendlyName), sizeof(friendlyName), &iPropertySize)
 			&& std::regex_match(friendlyName, match, comPortPat))
 		{
-			// Looks like a COM port - extract the port name
-			std::wstring portName = match[1].str();
-
-			// identify the parent device; if it matches our own parent, this is
-			// our COM port
+			// It has the right format for a COMn port, so it's a possible match.
+			// Identify the parent device; if it matches our own parent, this is
+			// our COM port.
 			DEVINST comDevInstParent = NULL;
 			if (CM_Get_Parent(&comDevInstParent, devInfoData.DevInst, 0) == CR_SUCCESS
 				&& comDevInstParent == devInstParent)
 			{
+				// extract the COMn port name substring from the friendly name string
+				std::wstring portName = match[1].str();
+
 				// set the name, flag success, and stop searching
 				name = ToTCHAR(portName.c_str());
 				found = true;
@@ -443,40 +468,6 @@ bool VendorInterfaceDesc::GetCDCPort(TSTRING &name) const
 // device.
 const GUID VendorInterface::devIfcGUID {
 	0xD3057FB3, 0x8F4C, 0x4AF9, 0x94, 0x40, 0xB2, 0x20, 0xC3, 0xB2, 0xBA, 0x23 };
-
-// Generic WinUSB device interface.  This is the class GUID that's generally
-// assigned to WinUSB devices that are installed manually rather than through
-// device-side MS OS descriptors.  Zadig and libwdi use this for a manual
-// WinUSB install, so this is the GUID that will generally be assigned to the
-// Pico ROM Boot Loader on any system where the user has intentionally used
-// Zadig to enable WinUSB for the Pico RP2 Boot device.  Note that the RP2
-// Boot device *isn't* assigned this interface automatically!  Out of the box,
-// RP2 Boot just exposes a naked vendor interface that NOTHING on the Windows
-// side will be able to connect to.  The vendor interface can be used with
-// WinUSB only if the user manually associates WinUSB with the device, using
-// Zadig or some similar Windows-driver-installer tool.  It's also possible
-// for someone to associate a different, custom GUID with the RP2 vendor
-// interface, by manually entering a custom GUID when setting up the device
-// association via Zadig or whatever else, but you'd have to go far out of
-// your way to make that happen, and have some really unusual use case to
-// even want to, so I think we can rule it out for all practical purposes.
-DEFINE_GUID(GUID_DEVINTERFACE_WINUSB,
-	0xdee824ef, 0x729b, 0x4a0e, 0x9c, 0x14, 0xb7, 0x11, 0x7d, 0x33, 0xa8, 0x17);
-
-// Generic USB device GUID.  This can be used to enumerate all devices that
-// are *potentially* accessible via WinUSB, whether or not they've been set
-// up with WinUSB driver associations.  This can be used to enumerate Picos
-// that are connected while in RP2 Boot device mode even if they haven't
-// been set up for WinUSB access yet.  The Pico's RP2 Boot mode exposes a
-// generic vendor interface that's capable of connecting through WinUSB,
-// but actually doing so requires WinUSB setup via Zadig, libwdi, or some
-// other Windows device driver installer.  The Pico unfortunately does not
-// expose the USB MS OS descriptors that would allow that driver setup to
-// happen automatically, so manual setup is required if it's desired; that's
-// required, for example, if you want to use the Raspberry-supplied PicoTool
-// program.
-DEFINE_GUID(GUID_DEVINTERFACE_USB_DEVICE,
-	0xA5DCBF10, 0x6530, 0x11D2, 0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED);
 
 // Enumerate available WinUSB devices
 HRESULT VendorInterface::EnumerateDevices(std::list<VendorInterfaceDesc> &devices)
@@ -552,6 +543,71 @@ HRESULT VendorInterface::EnumerateDevices(std::list<VendorInterfaceDesc> &device
 
 	// success
 	return S_OK;
+}
+
+HRESULT VendorInterface::EnumerateDevicesByID(std::list<VendorInterfaceDesc> &matchList, const char *id)
+{
+	// clear the caller's list
+	matchList.clear();
+
+	// Enumerate Pinscape Pico devices
+	HRESULT hr;
+	std::list<VendorInterfaceDesc> devices;
+	hr = VendorInterface::EnumerateDevices(devices);
+	if (!SUCCEEDED(hr))
+		return hr;
+
+	// Find the target device
+	if (devices.size() == 0)
+	{
+		// no devices found - there's nothing to match; return successfully with
+		// an empty list
+		return S_OK;
+	}
+	else if (id != nullptr && strlen(id) != 0)
+	{
+		// device specified - scan for a matching ID
+		std::list<VendorInterfaceDesc> exactMatches;
+		std::list<VendorInterfaceDesc> partialMatches;
+		for (auto &p : devices)
+		{
+			std::unique_ptr<VendorInterface> dev;
+			PinscapePico::DeviceID devId;
+			if (SUCCEEDED(p.Open(dev))
+				&& SUCCEEDED(dev->QueryID(devId)))
+			{
+				// check for an exact match
+				auto hwid = devId.hwid.ToString();
+				if (_stricmp(hwid.c_str(), id) == 0
+					|| (std::regex_match(id, std::regex("\\d+")) && devId.unitNum == atoi(id))
+					|| _stricmp(devId.unitName.c_str(), id) == 0)
+				{
+					// matched - include it in the match list
+					exactMatches.emplace_back(p);
+				}
+
+				// If the ID string is at least four characters long,
+				// check for a partial match against the hardware ID,
+				// matching any substring.  This allows matching the
+				// hardware ID a few leading or trailing digits rather
+				// than having to type in the whole thing.  A few
+				// digits is usually enough to pick out a single unit.
+				if (strlen(id) >= 4 && StrStrIA(hwid.c_str(), id) != nullptr)
+					partialMatches.emplace_back(p);
+			}
+		}
+
+		// if there are any exact matches, return those in preference
+		// to the fragmentary hardware ID matches
+		matchList = exactMatches.size() != 0 ? exactMatches : partialMatches;
+		return S_OK;
+	}
+	else
+	{
+		// no filter criteria specified - return the entire list
+		matchList = devices;
+		return S_OK;
+	}
 }
 
 HRESULT VendorInterface::Open(std::unique_ptr<VendorInterface> &device, IDMatchFunc match)
@@ -656,13 +712,14 @@ int VendorInterface::QueryID(DeviceID &id)
 
 	// on success, and if the result arguments are the right size, copy the
 	// results back to the caller's out variable
-	if (stat == PinscapeResponse::OK && reply.argsSize >= offsetnext(PinscapeResponse::Args::ID, xinputPlayerIndex))
+	if (stat == PinscapeResponse::OK && reply.argsSize >= offsetnext(PinscapeResponse::Args::ID, ledWizUnitMask))
 	{
 		// set the hardware ID
 		static_assert(sizeof(id.hwid.b) == sizeof(reply.args.id.hwid));
 		memcpy(id.hwid.b, reply.args.id.hwid, sizeof(id.hwid.b));
 
 		// set the hardware versions
+		id.cpuType = reply.args.id.cpuType;
 		id.cpuVersion = reply.args.id.cpuVersion;
 		id.romVersion = reply.args.id.romVersion;
 
@@ -670,12 +727,12 @@ int VendorInterface::QueryID(DeviceID &id)
 		if (id.romVersion >= 1)
 		{
 			char buf[32];
-			sprintf_s(buf, "RP2040-B%d", id.romVersion - 1);
+			sprintf_s(buf, "RP%d-B%d", reply.args.id.cpuType, id.romVersion - 1);
 			id.romVersionName = buf;
 		}
 		else
 			id.romVersionName = "Unknown";
-		
+
 		// set the unit number
 		id.unitNum = reply.args.id.unitNum;
 
@@ -685,14 +742,25 @@ int VendorInterface::QueryID(DeviceID &id)
 		// set the LedWiz unit number
 		id.ledWizUnitMask = reply.args.id.ledWizUnitMask;
 
-		// set the unit name from the transfer data
-		if (xferIn.size() >= 32)
+		// The extra transfer data consists of a series of null-terminated
+		// strings, with single-byte characters.  The strings are in a defined order,
+		// packed sequentially, with each string immediately following the null
+		// byte of the previous string.
 		{
-			// the name must be 31 characters or less; search for the null
-			// terminator, but stop if we don't find it after 31 non-null bytes
-			size_t len = 0;
-			for (const BYTE *p = xferIn.data() ; len < 32 && *p != 0 ; ++p, ++len);
-			id.unitName.assign(reinterpret_cast<const char*>(xferIn.data()), len);
+			const BYTE *p = xferIn.data();
+			const BYTE *end = p + xferIn.size();
+			auto GetNextStr = [&p, end](std::string &s) {
+				const BYTE *start = p;
+				for (; p < end && *p != 0 ; ++p) ;
+				s.assign(reinterpret_cast<const char*>(start), p - start);
+				++p;
+			};
+
+			GetNextStr(id.unitName);
+			GetNextStr(id.targetBoardName);
+			GetNextStr(id.picoSDKVersion);
+			GetNextStr(id.tinyusbVersion);
+			GetNextStr(id.compilerVersion);
 		}
 	}
 
@@ -737,10 +805,10 @@ std::string IRCommand::ToString() const
 bool IRCommand::Parse(const char *str, size_t len)
 {
 	// match our universal IR code format
-	static const std::regex irCmdPat("([0-9a-f]{2})\\.([0-9a-f]{2})\\.([0-9a-f]{4,16})", std::regex_constants::icase);
-	const std::string_view strview(str, len);
+	static const std::regex irCmdPat("\\s*([0-9a-f]{2})\\.([0-9a-f]{2})\\.([0-9a-f]{4,16})\\s*", std::regex_constants::icase);
+	const std::string_view strView(str, len);
 	std::match_results<std::string_view::iterator> m;
-	if (!std::regex_match(strview.begin(), strview.end(), m, irCmdPat))
+	if (!std::regex_match(strView.begin(), strView.end(), m, irCmdPat))
 	{
 		// invalid format
 		return false;
@@ -764,6 +832,12 @@ int VendorInterface::ResetPico()
 int VendorInterface::EnterSafeMode()
 {
 	uint8_t args = PinscapeRequest::SUBCMD_RESET_SAFEMODE;
+	return SendRequestWithArgs(PinscapeRequest::CMD_RESET, args);
+}
+
+int VendorInterface::EnterFactoryMode()
+{
+	uint8_t args = PinscapeRequest::SUBCMD_RESET_FACTORY;
 	return SendRequestWithArgs(PinscapeRequest::CMD_RESET, args);
 }
 
@@ -795,10 +869,23 @@ int VendorInterface::PutConfig(const char *txt, uint32_t txtLen, uint8_t fileID)
 	// calculate the CRC of the entire file
 	uint32_t crc = CRC::Calculate(txt, txtLen, CRC::CRC_32());
 
+	// Send the START OF FILE request.  This is a dummy version of the
+	// normal data page request, with no page data included and the page
+	// number set to 0xFFFF.
+	{
+		PinscapeRequest::Args::Config cfg{ PinscapeRequest::SUBCMD_CONFIG_PUT };
+		cfg.crc = crc;
+		cfg.page = 0xFFFF;
+		cfg.nPages = nPages;
+		cfg.fileID = fileID;
+		if (int stat = SendRequestWithArgs(PinscapeRequest::CMD_CONFIG, cfg); stat != PinscapeResponse::OK)
+			return stat;
+	}
+
 	// send the pages to the device for storage in the device's flash memory
-	const char *curPage = txt;
+	const char *curPageTxt = txt;
 	int txtLengthRemaining = static_cast<int>(txtLen);
-	for (int pageNum = 0 ; pageNum < nPages ; ++pageNum, curPage += PAGE_SIZE, txtLengthRemaining -= PAGE_SIZE)
+	for (int pageNum = 0 ; pageNum < nPages ; ++pageNum, curPageTxt += PAGE_SIZE, txtLengthRemaining -= PAGE_SIZE)
 	{
 		// send one page, or the length remaining, whichever is smaller
 		int copyLength = txtLengthRemaining < PAGE_SIZE ? txtLengthRemaining : PAGE_SIZE;
@@ -810,11 +897,49 @@ int VendorInterface::PutConfig(const char *txt, uint32_t txtLen, uint8_t fileID)
 		cfg.nPages = nPages;
 		cfg.fileID = fileID;
 
-		// send the request to store the page
-		const auto *xferOut = reinterpret_cast<const uint8_t*>(curPage);
-		int stat = SendRequestWithArgs(PinscapeRequest::CMD_CONFIG, cfg, xferOut, copyLength);
-		if (stat != PinscapeResponse::OK)
-			return stat;
+		// Send the request to store the page.  Once we start sending
+		// a config file, it's important to complete the operation,
+		// because abandoning it partway could leave the flash space
+		// on the device with a partially written copy of the file,
+		// preventing the device from booting normally.  That's still
+		// easily recoverable through Safe Mode, but we'd like to make
+		// the update as bulletproof as possible even so.  To that end,
+		// allow for a few retries on each request in the event of an
+		// error.  This will avoid abandoning the transfer if we run
+		// into a transient USB hiccup.
+		for (int tries = 0 ; ; ++tries)
+		{
+			// send the request to store the page
+			const auto *xferOut = reinterpret_cast<const uint8_t*>(curPageTxt);
+			int stat = SendRequestWithArgs(PinscapeRequest::CMD_CONFIG, cfg, xferOut, copyLength);
+
+			// on success, we can stop retrying
+			if (stat == PinscapeResponse::OK)
+				break;
+
+			// If this was a retry, and the device responded with a 
+			// RETRY_OK code, it means that the device actually did
+			// receive our previous attempt and processed it
+			// successfully.  So the only error was that we didn't
+			// get its acknowledgment - the page has in fact been
+			// stored successfully, and we can safely move on to
+			// the next one.  Note that RETRY_OK is only valid if
+			// we actually were resending the page - if we get it
+			// on our first try, it suggests that something is out
+			// of sync between our state and the device's state,
+			// so it might not be safe to proceed.
+			if (stat == PinscapeResponse::ERR_RETRY_OK && tries > 0)
+				break;
+
+			// This call failed.  If we've already tried a couple
+			// of times, give up, since any transient error that
+			// the USB driver can recover from automatically should
+			// clear quickly.  A repeated error probably won't
+			// resolve without user intervention, so we'd just get
+			// stuck here indefinitely if we kept retrying.
+			if (tries > 3)
+				return stat;
+		}
 	}
 
 	// success
@@ -874,7 +999,7 @@ int VendorInterface::GetConfig(std::vector<char> &txt, uint8_t fileID)
 	}
 }
 
-int VendorInterface::ConfigFileExists(uint8_t fileID, bool &exists)
+int VendorInterface::QueryConfigFileExists(uint8_t fileID, bool &exists)
 {
 	// query the status
 	PinscapeRequest::Args::Config args{ PinscapeRequest::SUBCMD_CONFIG_EXISTS };
@@ -926,8 +1051,11 @@ int VendorInterface::QueryStats(PinscapePico::Statistics *stats, size_t sizeofSt
 	// retrieve the statistics from the device
 	PinscapeResponse resp;
 	std::vector<BYTE> xferIn;
-	uint8_t args = (resetCounters ? PinscapeRequest::QUERYSTATS_FLAG_RESET_COUNTERS : 0);
-	int result = SendRequestWithArgs(PinscapeRequest::CMD_QUERY_STATS, args, resp, nullptr, 0, &xferIn);
+	uint8_t args[2]{
+		PinscapeRequest::SUBCMD_STATS_QUERY_STATS,
+		static_cast<uint8_t>(resetCounters ? PinscapeRequest::QUERYSTATS_FLAG_RESET_COUNTERS : 0) 
+	};
+	int result = SendRequestWithArgs(PinscapeRequest::CMD_STATS, args, resp, nullptr, 0, &xferIn);
 	if (result != PinscapeResponse::OK)
 		return result;
 
@@ -1141,14 +1269,14 @@ int VendorInterface::QueryIRCommandsReceived(std::vector<IRCommandReceived> &com
 		dst.hasToggle = (src->cmdFlags & src->F_HAS_TOGGLE) != 0;
 		dst.toggle = (src->cmdFlags & src->F_TOGGLE_BIT) != 0;
 		dst.isAutoRepeat = (src->cmdFlags & src->F_AUTOREPEAT) != 0;
-		uint8_t posCode = (src->cmdFlags & src->F_POS_MASK);
-		switch (posCode)
-		{
-		case IRCommandListEle::F_POS_FIRST: dst.posCode = dst.POS_FIRST; break;
-		case IRCommandListEle::F_POS_MIDDLE: dst.posCode = dst.POS_MIDDLE; break;
-		case IRCommandListEle::F_POS_LAST: dst.posCode = dst.POS_LAST; break;
-		default: dst.posCode = dst.POS_NULL;
-		}
+
+		static const std::unordered_map<uint8_t, uint8_t> posCodeMap{
+			{ IRCommandListEle::F_POS_FIRST, IRCommandReceived::POS_FIRST },
+			{ IRCommandListEle::F_POS_MIDDLE, IRCommandReceived::POS_MIDDLE },
+			{ IRCommandListEle::F_POS_LAST, IRCommandReceived::POS_LAST },
+		};
+		auto itPosCode = posCodeMap.find(src->cmdFlags & src->F_POS_MASK);
+		dst.posCode = itPosCode != posCodeMap.end() ? itPosCode->second : dst.POS_NULL;
 	}
 
 	// success
@@ -1602,6 +1730,59 @@ int VendorInterface::QueryButton74HC165States(std::vector<BYTE> &states)
 	return SendRequestWithArgs(PinscapeRequest::CMD_BUTTONS, subcmd, resp, nullptr, 0, &states);
 }
 
+int VendorInterface::QueryButtonEventLog(std::vector<PinscapePico::ButtonEventLogItem> &events, int gpioNumber)
+{
+	// range-check the GPIO number for argument packing
+	if (gpioNumber < 0 || gpioNumber > 255)
+		return PinscapeResponse::ERR_BAD_PARAMS;
+
+	// send the request
+	uint8_t args[2]{ PinscapeRequest::SUBCMD_BUTTON_QUERY_EVENT_LOG, static_cast<uint8_t>(gpioNumber) };
+	PinscapeResponse resp;
+	std::vector<BYTE> xferIn;
+	int stat = SendRequestWithArgs(PinscapeRequest::CMD_BUTTONS, args, nullptr, 0, &xferIn); 
+	if (stat != PinscapeResponse::OK)
+		return stat;
+
+	// sanity-check the response
+	if (xferIn.size() < offsetnext(PinscapePico::ButtonEventLog, cbItem))
+		return PinscapeResponse::ERR_BAD_REPLY_DATA;
+
+	// Get the response header, and check that there's enough data to fill
+	// out the list with the size claimed in the header.
+	const auto *hdr = reinterpret_cast<const PinscapePico::ButtonEventLog*>(xferIn.data());
+	size_t minSize = hdr->cb + hdr->cbItem*hdr->numItems;
+	if (xferIn.size() < minSize)
+		return PinscapeResponse::ERR_BAD_REPLY_DATA;
+	
+	// allocate the reply list and clear it to all zero bytes (this will
+	// zero extra bytes in the caller's struct if the Pico's item struct 
+	// is older==smaller than the version we're compiled against)
+	events.resize(hdr->numItems);
+	memset(events.data(), 0, events.size() * sizeof(PinscapePico::ButtonEventLogItem));
+
+	// populate the reply
+	const auto *srcItemBytePtr = reinterpret_cast<const uint8_t*>(xferIn.data() + hdr->cb);
+	PinscapePico::ButtonEventLogItem *dstItem = events.data();
+	for (unsigned int i = 0 ; i < hdr->numItems ; ++i, ++dstItem, srcItemBytePtr += hdr->cbItem)
+		memcpy(dstItem, srcItemBytePtr, hdr->cbItem);
+	
+	// success
+	return stat;
+}
+
+int VendorInterface::ClearButtonEventLog(int gpioNumber)
+{
+	// range-check the GPIO number for argument packing
+	if (gpioNumber < 0 || gpioNumber > 255)
+		return PinscapeResponse::ERR_BAD_PARAMS;
+
+	// send the request
+	uint8_t args[2]{ PinscapeRequest::SUBCMD_BUTTON_CLEAR_EVENT_LOG, static_cast<uint8_t>(gpioNumber) };
+	PinscapeResponse resp;
+	return SendRequestWithArgs(PinscapeRequest::CMD_BUTTONS, args);
+}
+
 int VendorInterface::SetLogicalOutputPortLevel(uint8_t port, uint8_t level)
 {
 	// send the request
@@ -1648,6 +1829,32 @@ int VendorInterface::QueryLogicalOutputPortConfig(std::vector<PinscapePico::Outp
 	CopyTransferArray(ports, pDesc, hdr->numDescs, hdr->cbDesc);
 
 	// success
+	return PinscapeResponse::OK;
+}
+
+int VendorInterface::QueryLogicalOutputPortName(int portNum, std::string &name)
+{
+	// make sure the port number is in range
+	if (portNum < 1 || portNum > 255)
+		return PinscapeResponse::ERR_BAD_PARAMS;
+
+	// send the request
+	PinscapeResponse resp;
+	std::vector<BYTE> xferIn;
+	uint8_t args[2]{ PinscapeRequest::SUBCMD_OUTPUT_QUERY_LOGICAL_PORT_NAME, static_cast<uint8_t>(portNum) };
+	int result = SendRequestWithArgs(PinscapeRequest::CMD_OUTPUTS, args, resp, nullptr, 0, &xferIn);
+	if (result != PinscapeResponse::OK)
+		return result;
+
+	// the string is given as a null-terminated single-byte string at the
+	// start of the extra transfer data
+	const char *start = reinterpret_cast<const char*>(xferIn.data());
+	const char *p = start;
+	size_t rem = xferIn.size();
+	for (; rem != 0 && *p != 0 ; ++p, --rem);
+
+	// assign the name
+	name.assign(start, p - start);
 	return PinscapeResponse::OK;
 }
 
@@ -1828,7 +2035,7 @@ int VendorInterface::SendRequest(
 	};
 
 	// it's an error if the request has a non-zero additional transfer-out
-	// data size, the caller didn't provide the data to send
+	// data size, and the caller didn't provide the data to send
 	if (request.xferBytes != 0 && xferOutData == nullptr)
 		return PinscapeResponse::ERR_BAD_XFER_LEN;
 
@@ -1895,23 +2102,38 @@ int VendorInterface::SendRequest(
 	// read any additional response data
 	if (resp.xferBytes != 0)
 	{
-		// If the caller didn't provide an output vector, it's an error,
-		// but we'll still need to read the data to keep the pipe in sync.
-		if (xferInData == nullptr)
+		// make room for the transfer-in data
+		uint8_t *xferInPtr = nullptr;
+		std::unique_ptr<BYTE> dummyBuf;
+		if (xferInData != nullptr)
 		{
-			// read the data into a temporary object
-			std::unique_ptr<BYTE> buf(new BYTE[resp.xferBytes]);
-			Read(buf.get(), resp.xferBytes, sz, REQUEST_TIMEOUT);
-
-			// the absence of an output buffer is a parameter error
-			return PinscapeResponse::ERR_BAD_PARAMS;
+			// the caller provided a buffer - size it to hold the transfer
+			xferInData->resize(resp.xferBytes);
+			xferInPtr = xferInData->data();
+		}
+		else
+		{
+			// the caller didn't provide a buffer - create a dummy buffer
+			dummyBuf.reset(new BYTE[resp.xferBytes]);
+			xferInPtr = dummyBuf.get();
 		}
 
-		// resize the output buffer vector and read the data
-		xferInData->resize(resp.xferBytes);
-		hr = Read(xferInData->data(), resp.xferBytes, sz, REQUEST_TIMEOUT);
-		if (!SUCCEEDED(hr) || sz != resp.xferBytes)
-			return PipeHRESULTToReturnCode(hr);
+		// read the data (which might arrive in multiple chunks)
+		for (auto xferRemaining = resp.xferBytes ; xferRemaining != 0 ; )
+		{
+			// resize the output buffer vector and read the data
+			hr = Read(xferInPtr, xferRemaining, sz, REQUEST_TIMEOUT);
+			if (!SUCCEEDED(hr))
+				return PipeHRESULTToReturnCode(hr);
+
+			// deduct this read from the remaining total and bump the read pointer
+			xferRemaining -= static_cast<uint16_t>(sz);
+			xferInPtr += sz;
+		}
+
+		// if we had to create a dummy buffer, it's a parameter error
+		if (xferInData == nullptr)
+			return PinscapeResponse::ERR_BAD_PARAMS;
 	}
 
 	// the USB exchange was concluded successfully, so return the status
@@ -2161,44 +2383,101 @@ HRESULT VendorInterface::GetDeviceDescriptor(USB_DEVICE_DESCRIPTOR &desc)
 
 HRESULT VendorInterface::Read(BYTE *buf, size_t bufSize, size_t &bytesRead, DWORD timeout_ms)
 {
+	// clean up old I/Os periodically
+	CleanUpTimedOutIOs(false);
+
 	// size_t can overflow ULONG on 64-bit platforms, so check first
 	if (bufSize > ULONG_MAX)
 		return E_INVALIDARG;
 
-	// read the pipe
-	OVERLAPPEDHolder ov(winusbHandle);
-	ULONG sz = 0;
-	bytesRead = 0;
-	if (!WinUsb_ReadPipe(winusbHandle, epIn, buf, static_cast<ULONG>(bufSize), &sz, &ov.ov))
+	// create an IO tracker for the transaction
+	std::unique_ptr<IOTracker> io(new IOTracker(this, bufSize));
+
+	// start the asynchronous read
+	DWORD err;
+	HRESULT ret;
+	if (WinUsb_ReadPipe(winusbHandle, epIn, io->buf.data(), static_cast<ULONG>(bufSize), NULL, &io->ov.ov)
+		|| (err = GetLastError()) == ERROR_IO_PENDING)
 	{
-		DWORD err = GetLastError();
-		if (err != ERROR_IO_PENDING)
-			return HRESULT_FROM_WIN32(err);
+		// I/O successfully started - wait for completion
+		ret = io->ov.Wait(timeout_ms, bytesRead);
+
+		// on success, copy the result back to the caller's buffer
+		if (SUCCEEDED(ret))
+			memcpy(buf, io->buf.data(), bufSize);
+
+		// If the I/O didn't complete, save the IOTracker to the timed-out list.
+		// We can't destroy the IOTracker until the transaction completes because
+		// WinUsb can write into its buffers up at any time until then.
+		if (!io->IsCompleted())
+			timedOutIOs.emplace_back(io.release());
+
+	}
+	else
+	{
+		// failed - return the error code from the Read attempt
+		ret = HRESULT_FROM_WIN32(err);
 	}
 
-	// wait for the timeout
-	return ov.Wait(timeout_ms, bytesRead);
+	// return the result
+	return ret;
 }
 
 HRESULT VendorInterface::Write(const BYTE *buf, size_t len, size_t &bytesWritten, DWORD timeout_ms)
 {
+	// clean up old I/Os periodically
+	CleanUpTimedOutIOs(false);
+
 	// size_t can overflow ULONG on 64-bit platforms, so check first
 	if (len > ULONG_MAX)
 		return E_INVALIDARG;
 
+	// create an IO tracker for the transaction
+	std::unique_ptr<IOTracker> io(new IOTracker(this, buf, len));
+
 	// write the data
-	OVERLAPPEDHolder ov(winusbHandle);
-	ULONG sz = 0;
-	bytesWritten = 0;
-	if (!WinUsb_WritePipe(winusbHandle, epOut, const_cast<BYTE*>(buf), static_cast<ULONG>(len), &sz, &ov.ov))
+	DWORD err;
+	HRESULT ret;
+	if (WinUsb_WritePipe(winusbHandle, epOut, io->buf.data(), static_cast<ULONG>(len), NULL, &io->ov.ov)
+		|| (err = GetLastError()) == ERROR_IO_PENDING)
 	{
-		DWORD err = GetLastError();
-		if (err != ERROR_IO_PENDING)
-			return HRESULT_FROM_WIN32(err);
+		// I/O successfully started - wait for completion
+		ret = io->ov.Wait(timeout_ms, bytesWritten);
+
+		// If the I/O didn't complete, save the IOTracker to the timed-out list.
+		// We can't destroy the IOTracker until the transaction completes because
+		// WinUsb can write into its buffers up at any time until then.
+		if (!io->IsCompleted())
+			timedOutIOs.emplace_back(io.release());
+	}
+	else
+	{
+		// I/O failed - return the error code from the Write attempt
+		ret = HRESULT_FROM_WIN32(err);
 	}
 
-	// wait for the timeout
-	return ov.Wait(timeout_ms, bytesWritten);
+	// return the result
+	return ret;
+}
+
+void VendorInterface::CleanUpTimedOutIOs(bool now)
+{
+	if (now || GetTickCount64() >= tCleanUpTimedOutIOs)
+	{
+		// scan the list
+		for (decltype(timedOutIOs.begin()) cur = timedOutIOs.begin(), nxt = cur ; cur != timedOutIOs.end() ; cur = nxt)
+		{
+			// move to the next before we potentially unlink the current one
+			++nxt;
+
+			// if the I/O has completed, we can discard the tracker
+			if ((*cur)->IsCompleted())
+				timedOutIOs.erase(cur);
+		}
+
+		// set the next cleanup time
+		tCleanUpTimedOutIOs = GetTickCount64() + 2500;
+	}
 }
 
 void VendorInterface::ResetPipes()
@@ -2215,5 +2494,249 @@ void VendorInterface::FlushRead()
 void VendorInterface::FlushWrite()
 {
 	WinUsb_FlushPipe(winusbHandle, epOut);
+}
+
+void VendorInterface::CloseDeviceHandle()
+{
+	// close the time-tracking handle
+	CloseTimeTrackingHandle();
+
+	// close the WinUSB handle
+	if (winusbHandle != NULL)
+	{
+		WinUsb_Free(winusbHandle);
+		winusbHandle = NULL;
+	}
+
+	// close the file handle
+	if (hDevice != NULL && hDevice != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(hDevice);
+		hDevice = NULL;
+	}
+}
+
+
+// --------------------------------------------------------------------------
+//
+// Pico clock synchronization.  Only available on Windows 10+.
+//
+
+#if VER_PRODUCTBUILD > 9600
+
+void VendorInterface::CloseTimeTrackingHandle()
+{
+	if (timeTrackingHandle != NULL)
+	{
+		USB_STOP_TRACKING_FOR_TIME_SYNC_INFORMATION sti{ timeTrackingHandle };
+		WinUsb_StopTrackingForTimeSync(winusbHandle, &sti);
+		timeTrackingHandle = NULL;
+	}
+}
+
+int VendorInterface::EnableClockSync(bool enable)
+{
+	// enable/disable time tracking on the client
+	VendorRequest::Args::TimeSync args;
+	args.hostClockAtSof = 0;
+	args.usbFrameNumber = enable ? args.ENABLE_FRAME_TRACKING : args.DISABLE_FRAME_TRACKING;
+	if (int stat = SendRequestWithArgs(VendorRequest::CMD_SYNC_CLOCKS, args); stat != VendorResponse::OK)
+		return stat;
+
+	// enable/disable time tracking in the WinUsb driver
+	if (enable && timeTrackingHandle == NULL)
+	{
+		// set up time tracking
+		USB_START_TRACKING_FOR_TIME_SYNC_INFORMATION syncInfo{ NULL, TRUE };
+		if (!WinUsb_StartTrackingForTimeSync(winusbHandle, &syncInfo) || syncInfo.TimeTrackingHandle == NULL)
+			return VendorResponse::ERR_FAILED;
+
+		// save the tracking handle
+		timeTrackingHandle = syncInfo.TimeTrackingHandle;
+	}
+	else if (!enable && timeTrackingHandle != NULL)
+	{
+		// stop time tracking
+		USB_STOP_TRACKING_FOR_TIME_SYNC_INFORMATION syncInfo{ timeTrackingHandle };
+		WinUsb_StopTrackingForTimeSync(winusbHandle, &syncInfo);
+		timeTrackingHandle = NULL;
+	}
+
+	// success
+	return VendorResponse::OK;
+}
+
+int VendorInterface::SynchronizeClocks(int64_t &picoClockOffset)
+{
+	// if time tracking isn't enabled on the Windows side, we can't proceed
+	if (timeTrackingHandle == NULL)
+		return VendorResponse::ERR_NOT_READY;
+
+	// get the current USB hardware frame counter and SOF time
+	USB_FRAME_NUMBER_AND_QPC_FOR_TIME_SYNC_INFORMATION qpcInfo{ timeTrackingHandle };
+	if (!WinUsb_GetCurrentFrameNumberAndQpc(winusbHandle, &qpcInfo))
+		return VendorResponse::ERR_FAILED;
+
+	// convert the QPC time from "ticks" since the QPC epoch to microseconds since the QPC epoch
+	uint64_t tMicroframe = static_cast<uint64_t>(
+		static_cast<double>(qpcInfo.CurrentQueryPerformanceCounter.QuadPart)
+		* (1.0e6 / static_cast<double>(qpcInfo.QueryPerformanceCounterFrequency.QuadPart)));
+
+	// Figure the time at the SOF, at microframe 0.  The current time in the 
+	// qpcInfo struct is the time at the start of the current hardware *microframe*,
+	// not the overall frame.  Each microframe is 125us, so deduct 125us times the
+	// microframe number to get the SOF time.
+	uint64_t tSOF = tMicroframe - qpcInfo.CurrentHardwareMicroFrameNumber*125;
+
+	// Get the frame index
+	uint16_t frameIndex = static_cast<uint16_t>(qpcInfo.CurrentHardwareFrameNumber);
+
+	// fill in command arguments
+	VendorRequest::Args::TimeSync args;
+	args.hostClockAtSof = tSOF;
+	args.usbFrameNumber = frameIndex;
+
+	// send the request
+	VendorResponse resp;
+	int stat = SendRequestWithArgs(VendorRequest::CMD_SYNC_CLOCKS, args, resp);
+
+	// On success, calculate the Pico clock offset, such that
+	//  T[Pico] = T[Windows] + picoClockOffset
+	if (stat == VendorResponse::OK)
+		picoClockOffset = static_cast<int64_t>(resp.args.timeSync.picoClockAtSof - tSOF);
+
+	// return the result
+	return stat;
+}
+
+int VendorInterface::QueryPicoSystemClock(int64_t &w1, int64_t &w2, uint64_t &p1, uint64_t &p2)
+{
+	// send the pre-query command, to get the Pico into fast polling
+	// mode, so that it processes the command as quickly as possible
+	PinscapeResponse resp;
+	uint8_t args = PinscapeRequest::SUBCMD_STATS_PREP_QUERY_CLOCK;
+	int result = SendRequestWithArgs(PinscapeRequest::CMD_STATS, args, resp);
+	if (result != PinscapeResponse::OK)
+		return result;
+
+	// The main purpose of reading the Pico clock is to synchronize
+	// time readings with the host clock.  The limiting factor in
+	// the precision of the synchronization is the elapsed time in
+	// the USB round trip, including time spent going through the
+	// Windows API layers and USB driver stack layers.  We can't do
+	// anything here to affect the actual USB hardware transmission
+	// time, and we also can't do anything to make the Windows API
+	// code paths shorter.  But we can at least streamline our own
+	// code bracketing the USB send/receive operations, by calling
+	// the Windows APIs directly rather than using our helper
+	// functions.  That also lets us take the time snapshots
+	// immediately before calling the "send" API and immediately
+	// after the "receive" API returns.
+	PinscapeRequest req{ token++, PinscapeRequest::CMD_STATS, 0 };
+	req.args.argBytes[0] = PinscapeRequest::SUBCMD_STATS_QUERY_CLOCK;
+
+	// set up the OVERLAPPED structure
+	OVERLAPPEDHolder ovWrite(hDevice, winusbHandle);
+	OVERLAPPEDHolder ovRead(hDevice, winusbHandle);
+
+	// record the starting time
+	LARGE_INTEGER t1, t2;
+	QueryPerformanceCounter(&t1);
+
+	// send the request
+	ULONG sz;
+	if (!WinUsb_WritePipe(winusbHandle, epOut,
+		reinterpret_cast<BYTE*>(&req), static_cast<ULONG>(sizeof(req)), &sz, &ovWrite.ov)
+		&& (GetLastError() != ERROR_IO_PENDING || !SUCCEEDED(ovWrite.Wait(REQUEST_TIMEOUT, sz))))
+		return PinscapeResponse::ERR_FAILED;
+
+	// read the reply
+	if (!WinUsb_ReadPipe(winusbHandle, epIn,
+		reinterpret_cast<BYTE*>(&resp), static_cast<ULONG>(sizeof(resp)), &sz, &ovRead.ov)
+		&& (GetLastError() != ERROR_IO_PENDING || !SUCCEEDED(ovRead.Wait(REQUEST_TIMEOUT, sz))))
+		return PinscapeResponse::ERR_FAILED;
+
+	// record the return time snap
+	QueryPerformanceCounter(&t2);
+
+	// check the result
+	if (resp.token != req.token || resp.argsSize < 16)
+		return PinscapeResponse::ERR_BAD_REPLY_DATA;
+
+	// unpack the reply arguments (the Pico before and after timestamps)
+	const uint8_t *p = resp.args.argBytes;
+	p1 = GetUInt64(p);
+	p2 = GetUInt64(p);
+
+	// pass back the Windows timestamps
+	w1 = t1.QuadPart;
+	w2 = t2.QuadPart;
+
+	// success
+	return PinscapeResponse::OK;
+}
+#else
+
+//
+// Stubs for pre-Windows 10 systems, where time-tracking isn't available
+//
+
+void VendorInterface::CloseTimeTrackingHandle()
+{
+}
+
+#endif // VER_PRODUCTBUILD > 9600
+
+
+// --------------------------------------------------------------------------
+//
+// Shared device object
+//
+
+VendorInterface::Shared::Shared(VendorInterface *device, HWND hwndNotify)
+	: device(device), hwndNotify(hwndNotify)
+{
+	// if a notification window was provided, and we have a valid device
+	// handle, register the window to receive notifications
+	RegisterNotify();
+}
+
+VendorInterface::Shared::~Shared()
+{
+	// done with the mutex
+	CloseHandle(mutex);
+
+	// unregister the notification handle
+	UnregisterNotify();
+}
+
+void VendorInterface::Shared::Set(VendorInterface *device, HWND hwndNotify)
+{
+	// unregister any prior notification handle
+	UnregisterNotify();
+
+	// set the new device and registration
+	this->device.reset(device);
+	this->hwndNotify = hwndNotify;
+	RegisterNotify();
+}
+
+void VendorInterface::Shared::RegisterNotify()
+{
+	if (hwndNotify != NULL && device != nullptr
+		&& device->GetDeviceHandle() != NULL && device->GetDeviceHandle() != INVALID_HANDLE_VALUE)
+	{
+		DEV_BROADCAST_HANDLE dbh{ sizeof(dbh), DBT_DEVTYP_HANDLE, 0, device->GetDeviceHandle() };
+		deviceNotifyHandle = RegisterDeviceNotification(hwndNotify, &dbh, DEVICE_NOTIFY_WINDOW_HANDLE);
+	}
+}
+
+void VendorInterface::Shared::UnregisterNotify()
+{
+	if (deviceNotifyHandle != NULL)
+	{
+		UnregisterDeviceNotification(deviceNotifyHandle);
+		deviceNotifyHandle = NULL;
+	}
 }
 

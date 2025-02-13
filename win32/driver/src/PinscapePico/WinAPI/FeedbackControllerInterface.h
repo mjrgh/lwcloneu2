@@ -1,5 +1,5 @@
 // Pinscape Pico - Feedback Controller Interface
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024 Michael J Roberts / BSD-3-Clause license, 2025 / NO WARRANTY
 //
 // This is an API for accessing the Pinscape Pico's Feedback
 // Controller USB interface.  The Feedback Controller interface

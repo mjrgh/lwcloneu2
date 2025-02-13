@@ -171,7 +171,7 @@ static void lwz_notify_callback(lwz_context_t *h, int reason, LWZHANDLE hlwz);
 static void lwz_refreshlist_attached(lwz_context_t *h);
 static void lwz_refreshlist_detached(lwz_context_t *h);
 static void lwz_freelist(lwz_context_t *h);
-static void lwz_add(lwz_context_t *h, int indx);
+static void lwz_add(lwz_context_t *h, int ndevices, const int *device_indices);
 static void lwz_remove(lwz_context_t *h, int indx);
 
 enum packet_type_t
@@ -186,7 +186,7 @@ enum packet_type_t
 
 static void queue_close(HQUEUE hqueue, bool unload);
 static HQUEUE queue_open(void);
-static size_t queue_push(HQUEUE hqueue, 
+static size_t queue_push(HQUEUE hqueue, LWZHANDLE hlwz,
 	HUDEV hudev, std::shared_ptr<PinscapePico::FeedbackControllerInterface> *fci, int starting_port_num,
 	packet_type_t typ, uint8_t const *pdata, size_t ndata);
 static size_t queue_shift(HQUEUE hqueue, packet_type_t &packet_type,
@@ -303,7 +303,7 @@ void LWZ_SBA(LWZHANDLE hlwz,
 
 	#if defined(USE_SEPARATE_IO_THREAD)
 
-	queue_push(g_plwz->hqueue, huDev, &psPico, startingPortNum, packet_type, &data[0], 8);
+	queue_push(g_plwz->hqueue, hlwz, huDev, &psPico, startingPortNum, packet_type, &data[0], 8);
 
 	#else
 
@@ -451,7 +451,7 @@ void LWZ_PBA(LWZHANDLE hlwz, BYTE const *pbrightness_32bytes)
 
 	#if defined(USE_SEPARATE_IO_THREAD)
 
-	queue_push(g_plwz->hqueue, huDev, &pDev->psPico, starting_port_num, packet_type, pdata, dataSize);
+	queue_push(g_plwz->hqueue, hlwz, huDev, &pDev->psPico, starting_port_num, packet_type, pdata, dataSize);
 
 	#else
 
@@ -482,7 +482,7 @@ DWORD LWZ_RAWWRITE(LWZHANDLE hlwz, BYTE const *pdata, DWORD ndata)
 
 	#if defined(USE_SEPARATE_IO_THREAD)
 
-	nBytesWritten = static_cast<DWORD>(queue_push(g_plwz->hqueue, huDev, nullptr, 0, PACKET_TYPE_RAW, pdata, ndata));
+	nBytesWritten = static_cast<DWORD>(queue_push(g_plwz->hqueue, hlwz, huDev, nullptr, 0, PACKET_TYPE_RAW, pdata, ndata));
 
 	#else
 
@@ -799,7 +799,7 @@ static lwz_context_t * lwz_open(HINSTANCE hinstDLL)
 		char logName[MAX_PATH];
 		SYSTEMTIME st;
 		GetLocalTime(&st);
-		_snprintf_s(logName, _TRUNCATE, "%s\\LedWiz-%04d%02d%02d-%02d%02d%02d.log",
+		snprintf(logName, _countof(logName), "%s\\LedWiz-%04d%02d%02d-%02d%02d%02d.log",
 			path, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 		if (fopen_s(&h->fpLog, logName, "w") != 0)
 			h->fpLog = nullptr;
@@ -1593,6 +1593,7 @@ static void lwz_freelist(lwz_context_t *h)
 // simple FIFO to move the WriteFile() calls to a separate thread
 struct fifo_msg_t
 {
+	LWZHANDLE hlwz = 0;
 	HUDEV hudev = NULL;
 	std::shared_ptr<PinscapePico::FeedbackControllerInterface> psPico;
 	int starting_port_num = 0;
@@ -1702,7 +1703,7 @@ static void queue_close(HQUEUE hqueue, bool unload)
 	{
 		// Add a special "quit" item to the queue, identified by a zero
 		// data length.  The thread quits when it reads this item.
-		queue_push(h, NULL, nullptr, 0, PACKET_TYPE_RAW, NULL, 0);
+		queue_push(h, 0, NULL, nullptr, 0, PACKET_TYPE_RAW, NULL, 0);
 
 		if (unload)
 		{
@@ -1813,7 +1814,7 @@ static void queue_wait_empty(HQUEUE hqueue)
 	}
 }
 
-static size_t queue_push(HQUEUE hqueue, 
+static size_t queue_push(HQUEUE hqueue, LWZHANDLE hlwz,
 	HUDEV hudev, std::shared_ptr<PinscapePico::FeedbackControllerInterface> *psPico,
 	int starting_port_num, packet_type_t typ, uint8_t const *pdata, size_t ndata)
 {
@@ -1856,17 +1857,14 @@ static size_t queue_push(HQUEUE hqueue,
 			if (typ == PACKET_TYPE_PBA)
 			{
 				for (int i = 0, pos = h->rpos ; i < h->level ;
-					 ++i, pos = (pos + 1) % QUEUE_LENGTH)
+					++i, pos = (pos + 1) % QUEUE_LENGTH)
 				{
 					fifo_msg_t *chunk = &h->buf[pos];
-					if (chunk->hudev == hudev)
+					if (chunk->hlwz == hlwz && chunk->typ == PACKET_TYPE_PBA)
 					{
-						if (chunk->typ == PACKET_TYPE_PBA)
-						{
-							memcpy(chunk->data, pdata, ndata);
-							combined = true;
-							break;
-						}
+						memcpy(chunk->data, pdata, ndata);
+						combined = true;
+						break;
 					}
 				}
 			}
@@ -1899,7 +1897,7 @@ static size_t queue_push(HQUEUE hqueue,
 					// it's a PBA, forget any previous SBA, since we don't want
 					// to overwrite an SBA followed by a PBA.
 					fifo_msg_t *chunk = &h->buf[pos];
-					if (chunk->hudev == hudev)
+					if (chunk->hlwz == hlwz)
 					{
 						if (chunk->typ == PACKET_TYPE_SBA)
 							last_sba_pos = pos;
@@ -1934,6 +1932,7 @@ static size_t queue_push(HQUEUE hqueue,
 				if (hudev != NULL)
 					usbdev_addref(hudev);
 
+				pc->hlwz = hlwz;
 				pc->hudev = hudev;
 				if (psPico != nullptr) pc->psPico = *psPico;
 				pc->ndata = ndata;

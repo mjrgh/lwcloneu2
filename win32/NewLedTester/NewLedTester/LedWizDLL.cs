@@ -119,14 +119,35 @@ namespace NewLedTester
             UInt32 numdevices;
         }
 
-        // device type codes for LWZDEVICEINFO
-        public const UInt32 LWZ_DEVICE_TYPE_NONE = 0;
-        public const UInt32 LWZ_DEVICE_TYPE_LEDWIZ = 1;
-        public const UInt32 LWZ_DEVICE_TYPE_LWCLONEU2 = 2;
-        public const UInt32 LWZ_DEVICE_TYPE_PINSCAPE = 3;
-        public const UInt32 LWZ_DEVCIE_TYPE_PINSCAPE_VIRT = 4;
+        // Device type codes for LWZDEVICEINFO
+        //
+        // A Pinscape KL25Z Virtual unit represents the same physical Pinscape KL25Z as
+        // the next lower-numbered unit, and provides access to additional ports beyond
+        // the 32 ports that the LedWiz USB protocol can address.  The DLL creates a
+        // virtual unit for each group of 32 ports on a Pinscape KL25Z beyond the first
+        // 32, and gives them sequentially increasing unit numbers.  The client can
+        // address these through the DLL as though they were actual LedWiz units, but
+        // the units don't correspond to any USB HID interfaces, which is what makes
+        // them virtual.
+        //
+        // A Pinscape Pico virtual unit represents a group of 32 ports on a Pinscape
+        // Pico device.  Unlike the original Pinscape for KL25Z, Pinscape Pico doesn't
+        // expose ANY LedWiz USB HID interfaces.  Instead, it uses its own custom USB
+        // HID interface, which is not compatible with the LedWiz protocol, so the
+        // only way that an LedWiz client can access the device is through the DLL.
+        // As with the Pinscape KL25Z virtual devices, each Pinscape Pico virtual
+        // device represents a group of 32 Pinscape ports.  The only difference is
+        // that ALL of the Pico devices are virtual, even the one for ports 1-32.
+        //
+        public const UInt32 LWZ_DEVICE_TYPE_NONE = 0;               // no device on this unit number
+        public const UInt32 LWZ_DEVICE_TYPE_LEDWIZ = 1;             // LedWiz original, or clone with no special DLL extensions
+        public const UInt32 LWZ_DEVICE_TYPE_LWCLONEU2 = 2;          // LwCloneU2
+        public const UInt32 LWZ_DEVICE_TYPE_PINSCAPE = 3;           // Pinscape Controller (KL25Z)
+        public const UInt32 LWZ_DEVICE_TYPE_PINSCAPE_VIRT = 4;      // Pinscape Controller (KL25Z) virtual LedWiz for high-numbered ports past 32
+        public const UInt32 LWZ_DEVICE_TYPE_ZB = 5;                 // ZB Output Control (zebsboards.com)
+        public const UInt32 LWZ_DEVICE_TYPE_PINSCAPE_PICO = 6;      // Pinscape Pico virtual LedWiz
 
-        [StructLayout(LayoutKind.Sequential)]
+		[StructLayout(LayoutKind.Sequential)]
         public struct LWZDEVICEINFO
         {
             public UInt32 cbSize;

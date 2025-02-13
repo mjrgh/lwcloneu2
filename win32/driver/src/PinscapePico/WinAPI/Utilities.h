@@ -1,5 +1,5 @@
 // Pinscape Pico API - helper utilities
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024 Michael J Roberts / BSD-3-Clause license, 2025 / NO WARRANTY
 //
 
 #pragma once
@@ -47,7 +47,7 @@ public:
 class OVERLAPPEDHolder
 {
 public:
-	OVERLAPPEDHolder(WINUSB_INTERFACE_HANDLE winusbHandle) : winusbHandle(winusbHandle)
+	OVERLAPPEDHolder(HANDLE hFile, WINUSB_INTERFACE_HANDLE winusbHandle) : hFile(hFile), winusbHandle(winusbHandle)
 	{
 		ZeroMemory(&ov, sizeof(ov));
 		ov.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -58,20 +58,22 @@ public:
 		CloseHandle(ov.hEvent);
 	}
 
-	HRESULT Wait(DWORD timeout, size_t &bytesTransferred)
+	template<typename SizeType> HRESULT Wait(DWORD timeout, SizeType &bytesTransferred)
 	{
 		switch (WaitForSingleObject(ov.hEvent, timeout))
 		{
 		case WAIT_TIMEOUT:
-		case WAIT_ABANDONED:
+			// timeout - cancel the I/O and return ABORT status
+			Cancel(timeout);
 			return E_ABORT;
 
 		case WAIT_OBJECT_0:
+			// I/O completed - return the result from the OVERLAPPED struct
 			{
 				ULONG sz;
 				if (WinUsb_GetOverlappedResult(winusbHandle, &ov, &sz, FALSE))
 				{
-					bytesTransferred = sz;
+					bytesTransferred = static_cast<SizeType>(sz);
 					return S_OK;
 				}
 				else
@@ -79,14 +81,57 @@ public:
 			}
 
 		case WAIT_FAILED:
+			// error in the wait - cancel the I/O and return the underlying error code
+			Cancel(timeout);
+			CancelIoEx(hFile, &ov);
 			return HRESULT_FROM_WIN32(GetLastError());
 
 		default:
+			// other error - cancel the I/O and return generic FAIL status
+			Cancel(timeout);
 			return E_FAIL;
 		}
 	}
 
+	// cancel an I/O request, waiting for up to the timeout for the response to clear
+	void Cancel(DWORD timeout)
+	{
+		// cancel the I/O
+		CancelIoEx(hFile, &ov);
+
+		// Cancellation isn't necessarily synchronous, so allow some time
+		// for the request to clear, up to the timeout.  This effectively
+		// doubles the timeout period the caller requested, but that's
+		// preferable to leaving the I/O hanging, because an incomplete
+		// I/O tends to break the protocol flow for future requests. 
+		// Allowing some extra time for the I/O to clear is better for
+		// application stability.  In practice, WinUsb seems to resolve
+		// cancellations quickly (order of milliseconds), but not
+		// immediately, so the extra wait is worthwhile: it improves
+		// the chances that the pipe will recover and we can keep making
+		// requests, without incurring much actual wait time.
+		//
+		// We don't care what the outcome of the wait is, because there's
+		// nothing more we can do here to resolve the problem if the wait
+		// times out or fails with an error.  The purpose of the wait is
+		// to allow time for WinUsb to recover *when that's possible*,
+		// with the timeout to prevent a freeze when recovery isn't
+		// possible.  In the event that the cancellation doesn't complete
+		// within the timeout, the caller is responsible for keeping the
+		// OVERLAPPED struct's memory valid, because the WinUsb driver
+		// will hang onto the pointer to it until the I/O actually does
+		// complete, and could write into the memory at any time until
+		// then.
+		WaitForSingleObject(ov.hEvent, timeout);
+	}
+
+	// the original device handle
+	HANDLE hFile;
+
+	// the WinUsb handle layered on the device handle
 	WINUSB_INTERFACE_HANDLE winusbHandle;
+	
+	// system overlapped I/O tracking struct
 	OVERLAPPED ov;
 };
 

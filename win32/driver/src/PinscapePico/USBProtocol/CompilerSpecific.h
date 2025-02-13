@@ -1,5 +1,5 @@
 // Pinscape Pico - Compiler-Specific Definitions
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024 Michael J Roberts / BSD-3-Clause license, 2025 / NO WARRANTY
 //
 // This header defines some macros for special language features that
 // vary by compiler, so that we can write common code that works on both

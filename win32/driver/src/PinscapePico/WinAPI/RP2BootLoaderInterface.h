@@ -1,5 +1,5 @@
 // Pinscape Pico Device - Feedback Controller API
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024 Michael J Roberts / BSD-3-Clause license, 2025 / NO WARRANTY
 
 #pragma once
 
@@ -41,7 +41,7 @@ namespace PinscapePico
 	// reboot the Pico into the newly installed firmware.
 	struct RP2BootDevice
 	{
-	// forwards
+        // forwards
 		class IProgressCallback;
 
 		RP2BootDevice(const TCHAR *path, std::string bootloaderVersion) :
@@ -126,7 +126,7 @@ namespace PinscapePico
 		// well-known name strings are meant to be case-insensitive.
 		std::unordered_map<std::string, std::string> tags;
 
-
+        // Enumerate currently attached boot devices
 		using RP2BootDeviceList = std::list<RP2BootDevice>;
 		static RP2BootDeviceList EnumerateRP2BootDrives();
 

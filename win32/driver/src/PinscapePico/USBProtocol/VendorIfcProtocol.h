@@ -1,5 +1,5 @@
 // Pinscape Pico - USB Vendor Interface Protocol
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024, 2025 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
 //
 // This file defines the protocol for our vendor interface, which we use
 // to expose configuration and control functions.
@@ -33,7 +33,7 @@
 // On Windows, the vendor interface automatically registers itself as a
 // WinUsb device when the device is plugged in, so it's possible to
 // discover the interface programmatically without any user action.
-// (The only exeption is XP, where the WinUsb driver must be manually
+// (The only exception is XP, where the WinUsb driver must be manually
 // installed first.  WinUsb is a built-in component on all later Windows
 // versions.)
 //
@@ -67,7 +67,7 @@
 // with a response.  Some requests and responses come with additional
 // data after the basic request/reply struct.  When extra an extra data
 // object is needed for a request, simply write it to the OUT handle
-// immediately after the request sturct; when an extra data object is
+// immediately after the request struct; when an extra data object is
 // included in a response, read it from the IN handle immediately after
 // reading the response struct.  The request/response structs each
 // contain a field specifying the size of any additional data object
@@ -180,7 +180,7 @@ namespace PinscapePico
         uint32_t token;
 
         // Checksum.  This is a simple integrity check on the packet,
-        // to help ensure that the device doesn't attempt ot execute
+        // to help ensure that the device doesn't attempt to execute
         // ill-formed commands coming from unrelated applications.  Since
         // we use the generic WinUSB driver on Windows, any user-mode
         // application can send raw data over our endpoints.  (That's
@@ -231,8 +231,42 @@ namespace PinscapePico
         // on-screen.  The unit number and name aren't guaranteed to be
         // unique, since they're assigned by the user via the config file.
         //
-        // The unit name is passed back in the extra transfer data as a
-        // fixed-length 32-byte character array.
+        // The extra transfer data consists of a series of null-terminated
+        // strings, composed of single-byte characters, appended
+        // back-to-back (so that the next string starts immediately after
+        // the terminating null byte of the prior string):
+        //
+        // - Unit name: the unit name string, assigned in the JSON config.
+        //   This is a name assigned by the user, as a convenience for
+        //   identifying the device in display listings and the like.
+        //
+        // - Target board ID: the name string used in the Pico SDK to
+        //   identify the target board selected at compile time for the
+        //   firmware build process.  The Pico is an open-source design
+        //   with many clones, some compatible with the original reference
+        //   design and some with slight differences that require different compile-time
+        //   build settings.  That's what this ID indicates: the board
+        //   configuration that the running firmware was built for.
+        //   This isn't a "live" board ID; it only indicates which
+        //   build configuration was used to compile the firmware.  So
+        //   it won't distinguish among clones that use identical build
+        //   configurations.
+        //
+        // - Pico SDK version string: the version of the Pico SDK
+        //   used to build the firmware.  The format is defined by
+        //   the SDK developers, but it currently uses the typical
+        //   "x.y.z" convention.
+        //
+        // - TinyUSB version string: the version of the TinyUSB
+        //   library used to build the firmware, of the form "x.y.z".
+        //   (TinyUSB is the Pico SDK's official USB layer, but it's
+        //   a separate pboject with its own versioning.  The Pico
+        //   SDK version doesn't necessarily imply a particular
+        //   TinyUSB version.)
+        //    
+        // - Compiler version string: the name and version of the
+        //   C++ compiler used to build the firmware, typically
+        //   of the form "GNUC x.y.z".
         //
         // The hardware ID is a unique identifier for the physical Pico
         // unit, programmed permanently into ROM at the factory during the
@@ -268,6 +302,14 @@ namespace PinscapePico
         // host side will generally need to close and re-open its USB
         // connection.
         //
+        // When rebooting the firmware, the caller can select which
+        // settings file to load: the normal full settings file, the Safe
+        // Mode settings file, or no settings file ("factory").  Note
+        // that resetting in factory mode doesn't delete any settings;
+        // it simply skips loading any of the available settings files
+        // during the post-reset initialization, which has the effect of
+        // using factory defaults for all settings.
+        //
         // Resetting into Boot Loader mode can be used to install a
         // firmware update.  After the reset, the Pico will reconnect as
         // an RP2 Boot device, with its associated USB virtual disk drive.
@@ -287,6 +329,7 @@ namespace PinscapePico
         static const uint8_t SUBCMD_RESET_NORMAL = 0x01;      // run firmware program in standard mode
         static const uint8_t SUBCMD_RESET_SAFEMODE = 0x02;    // run firmware program in Safe Mode
         static const uint8_t SUBCMD_RESET_BOOTLOADER = 0x03;  // reset into the Pico's native Boot Loader mode
+        static const uint8_t SUBCMD_RESET_FACTORY = 0x04;     // reset firmware program, don't load any settings
 
         // Set the wall clock time.  This lets the host PC send the
         // current time of day and calendar date to the Pico.  The Pico
@@ -328,17 +371,50 @@ namespace PinscapePico
         //
         // SUBCMD_CONFIG_PUT
         //   Store configuration (host-to-device).  This transfers one 4K
-        //   block of configuration data to the device, which the device
-        //   stores in the selected section of flash.  The last page can
-        //   be less than 4K.  Pages must be sent in order from first to
-        //   last.  The device always creates a whole new config file on
-        //   receiving the first page, erasing the previous file, so the
-        //   host must send the entire file.  There's no way to update
-        //   just one page in the middle of the file, since we don't want
-        //   to require the host and device to be in sync on the file's
-        //   old contents.  Note that the sender must set the CRC field in
-        //   the arguments, so that the device can validate the completed
-        //   file on receiving the last page.
+        //   block of a configuration file to the device, which the device
+        //   stores in the selected section of flash.  Config files are
+        //   text files containing JSON definitions, and can be of any
+        //   size up to a limit set in the firmware (currently 128K).
+        //   Since the file size can easily exceed the block size, this
+        //   command is designed to be used in a simple protocol that
+        //   transfers a whole file in 4K chunks:
+        //
+        //    - First, the host sends a "start of file" SUBCMD_CONFIG_PUT
+        //      command, with the page number set to 0xFFFF, and no file
+        //      data (that is, no extra transfer data).  The device sets
+        //      up the internal data structures to write into flash.
+        //
+        //    - Next, the host breaks the file into 4K chunks, and sends
+        //      a SUBCMD_CONFIG_PUT command for each chunk.  These must
+        //      be sent in order, with page number 0x0000 for the first
+        //      page, page 0x0001 for the second, and so on.
+        //
+        //   Upon receiving the last chunk, the device automatically
+        //   validates the CRC-32 and closes the flash file.  It's not
+        //   necessary to pad the file to a 4K boundary, since the last
+        //   page can be of any size up to 4K.  The host must set the
+        //   CRC-32 it calculates over the ENTIRE STREAM, so that the
+        //   device can compare the host's CRC-32 calculation to its own,
+        //   to verify that the file's contents were received intact.
+        //
+        //   The must always send the complete file, using the protocol
+        //   above.  There's no way to update just one page in the middle
+        //   of the file, since we don't want to require the host and
+        //   device to be in sync on the file's old contents.
+        //
+        //   Pages must be sent in order from first to last, EXCEPT that
+        //   the host is allowed to repeat any page any number of times.
+        //   Repeats are specifically allowed so that the host can attempt
+        //   to recover from USB transmission errors (such as failing to
+        //   receive a reply to a PUT request) by resending a possibly
+        //   failed page.  If the host sends the same page more than
+        //   once, and the device has already successfully received and
+        //   stored that page, the device will reply with ERR_RETRY_OK
+        //   to indicate that the same page was already saved.  The
+        //   host should count this as a success *if* the host actually
+        //   was resending the page.  ERR_RETRY_OK in other cases would
+        //   indicate a protocol state mismatch, so should be considered
+        //   an error.
         //
         // SUBCMD_CONFIG_ERASE
         //   Erase the configuration file on the device.  This deletes the
@@ -433,7 +509,7 @@ namespace PinscapePico
         //   stillness.
         //
         // SUBCMD_NUDGE_QUERY_STATUS
-        //   Query nudge device status.  Returns a NugeStatus struct in
+        //   Query nudge device status.  Returns a NudgeStatus struct in
         //   the extra reply data.
         //
         // SUBCMD_NUDGE_QUERY_PARAMS
@@ -494,16 +570,62 @@ namespace PinscapePico
         static const uint8_t TVON_RELAY_ON = 0x02;
         static const uint8_t TVON_RELAY_PULSE = 0x03;
 
-        // Query statistics.  Returns data in the additional transfer
-        // bytes, as a Statistics struct.  The command arguments contain
-        // one byte of flags, as a combination of QUERYSTATS_FLAG_xxx bits
-        // defined below:
+        // Statistics commands.  The first byte of the request arguments
+        // is a sub-command code selecting the action to perform.  Additional
+        // argument bytes vary by sub-command.
         //
-        // QUERYSTATS_FLAG_RESET_COUNTERS
-        //   If set, the rolling-average counters are reset to start a
-        //   new averaging window.
+        // SUBCMD_STATS_QUERY_STATS
+        //   Query global statistics.  Returns data in the additional transfer
+        //   bytes, as a Statistics struct.  The second byte of the arguments
+        //   contains bit flags, as a combination of QUERYSTATS_FLAG_xxx bits
+        //   defined below:
         //
-        static const uint8_t CMD_QUERY_STATS = 0x0B;
+        //     QUERYSTATS_FLAG_RESET_COUNTERS
+        //       If set, the rolling-average counters are reset to start a
+        //       new averaging window.
+        //
+        // SUBCMD_STATS_QUERY_CLOCK
+        //   Note: for clock synchronization, use CMD_SYNC_CLOCKS instead of
+        //   this when possible, since that's much more precise.
+        //
+        //   Query the Pico system clock.  This returns two UINT64 values
+        //   packed into the reply arguments, representing times on the Pico
+        //   system clock, expressed in microseconds since the last CPU reset.
+        //   The first UINT64 is the clock reading at the start of the Pico's
+        //   processing of the query request, and the second is the updated
+        //   clock reading just before queueing the USB reply packet.  The
+        //   two timestamps allow the caller to bracket the time spent in the
+        //   USB transmission and processing of the USB packet on the Pico
+        //   and Windows sides, for a more accurate estimate on the Windows
+        //   side of the real-time offset between the Windows and Pico clocks.
+        //
+        //   The main purpose of this query is to allow the Windows host to
+        //   determine the Pico clock time that corresponds to any given
+        //   Windows clock time, so that the host can meaningfully measure
+        //   the elapsed time between events with Pico timestamps and events
+        //   with Windows timestamps.  For example, this can be used to
+        //   precisely measure the latency between a hardware event on the
+        //   Pico, such as a button state change, and the time that a HID
+        //   report for the event reaches the PC application layer.
+        //
+        // SUBCMD_STATS_PREP_QUERY_CLOCK
+        //   This command tells the Pico to expect a clock query command
+        //   immediately following.  The Pico goes into a polling loop for
+        //   the next command, without returning to its normal main loop
+        //   processing.  This is designed to make the timing of the clock
+        //   query processing as deterministic as possible, by eliminating
+        //   the uncertainty of the time it takes to go through the main
+        //   loop from the equation.  The caller is expected to send the
+        //   clock query command immediately.  To avoid locking up the
+        //   Pico, the immediate polling mode exits if no new command is
+        //   received within a few milliseconds.
+        //
+        static const uint8_t CMD_STATS = 0x0B;
+        static const uint8_t SUBCMD_STATS_QUERY_STATS = 0x01;
+        static const uint8_t SUBCMD_STATS_QUERY_CLOCK = 0x02;
+        static const uint8_t SUBCMD_STATS_PREP_QUERY_CLOCK = 0x03;
+
+        // flags for CMD_STATE + SUBCMD_STATS_QUERY_STATS
         static const uint8_t QUERYSTATS_FLAG_RESET_COUNTERS = 0x01;
 
         // Read data from the in-memory message logger.  The firmware
@@ -652,7 +774,7 @@ namespace PinscapePico
         //   other settings requests, the new calibration is stored in
         //   memory until settings are explicitly committed.  Note that
         //   calibration settings are inherently sensor-specific, so the
-        //   host should only apply calibratioh data taken from the same
+        //   host should only apply calibration data taken from the same
         //   sensor type as currently configured.  The new settings are
         //   passed in the extra transfer data, via struct PlungerCal.
         //
@@ -716,7 +838,7 @@ namespace PinscapePico
         //   state is the final states reported to the host after taking
         //   into account shift states, pulse timers, and so on, so the
         //   logical state doesn't always match the physical state of the
-        //   underyling input source.
+        //   underlying input source.
         //
         //   In addition, args.buttonState returns the global shift
         //   button state.  Each bit in globalShiftState represents a
@@ -729,11 +851,11 @@ namespace PinscapePico
         // SUBCMD_BUTTON_QUERY_GPIO_STATES
         //   Retrieves the current input states of all of the Pico GPIO
         //   ports.  All GPIO ports are reported whether, or not they're
-        //   mapped to buttons.The state is returned in the extra transfer
-        //   data, one byte per port starting at GP0, 0 for LOW, 1 for HIGH.
-        //   This gives the physical state of each port; it doesn't apply
-        //   the Active High/Low polarity setting for any button mapped
-        //   onto the port.
+        //   mapped to buttons.  The port states are returned in the extra
+        //   transfer data, one byte per port starting at GP0, 0 for LOW,
+        //   1 for HIGH.  This gives the physical state of each port; it
+        //   doesn't apply the Active High/Low polarity setting for any
+        //   button mapped onto the port.
         //
         // SUBCMD_BUTTON_QUERY_PCA9555_STATES
         //   Retrieves the current input states of all PCA9555 chips.
@@ -755,12 +877,62 @@ namespace PinscapePico
         //   state; it doesn't apply the Active High/Low polarity of any
         //   buttons mapped onto the port.
         //
+        // SUBCMD_BUTTON_QUERY_EVENT_LOG
+        //   Retrieves the event log for a GPIO button.  Event logging
+        //   is a performance measurement tool designed primarily for
+        //   measuring the elapsed time (the latency) between a physical
+        //   button press and the appearance on the host of the
+        //   corresponding HID report.  GPIO buttons are uniquely suited
+        //   for this measurement, because a Pico GPIO can be configured
+        //   to generate a hardware interrupt on the Pico every time the
+        //   voltage level on the pin transitions between high and low
+        //   logic level, and the Pico has very low latency servicing
+        //   these interrupts, on the order of 200ns.  This lets us
+        //   very precisely mark the time when a physical button press
+        //   or release occurs, which is what the event log captures.
+        //   The PC host can then correlate the timestamps in the event
+        //   log with the timestamps of the incoming HID reports that
+        //   represent the button presses, and calculate the HID report
+        //   latency from the time difference.  Note that calculating
+        //   the interval between a host event and a Pico event requires
+        //   a common reference point in time, which can be obtained via
+        //   the CMD_STATS + SUBCMD_STATS_QUERY_CLOCK command.
+        //
+        //   The second byte of the command arguments (following the
+        //   subcommand code byte in the first arguments byte) gives
+        //   the GPIO number to query.  The event log is returned in
+        //   the extra transfer data, as a ButtonEventLog struct,
+        //   followed by zero or more ButtonEventLogItem structs.
+        //   Items in the list are ordered from oldest to newest.
+        //
+        //   Retrieving events with this request deletes the events
+        //   from the Pico's internal buffer, so each request will
+        //   retrieve only new events that have occurred since the last
+        //   request.  The log buffer on the Pico has a fixed size;
+        //   when the buffer is full, the oldest event is discarded
+        //   each time a new event is added.  This means that there's
+        //   no need for the host to read events when it doesn't need
+        //   them; there's no harm in "overflowing" the buffer because
+        //   the Pico will just discard old events as needed to make
+        //   room.  This also means that the host program sees the
+        //   most recent events when it starts running, no matter how
+        //   long the Pico has already been collecting events.
+        //
+        // SUBCMD_BUTTON_CLEAR_EVENT_LOG
+        //   Clears the Pico buffer containing the event log for a
+        //   GPIO button.  The second byte of the command arguments
+        //   (following the subcommand code) gives the GPIO number
+        //   for the event log to clear.  Specifying GPIO=255 clears
+        //   the logs for all GPIOs.
+        //
         static const uint8_t CMD_BUTTONS = 0x10;
         static const uint8_t SUBCMD_BUTTON_QUERY_DESCS = 0x81;
         static const uint8_t SUBCMD_BUTTON_QUERY_STATES = 0x82;
-        static const uint8_t SUBCMD_BUTTON_QUERY_GPIO_STATES = 0x8;
+        static const uint8_t SUBCMD_BUTTON_QUERY_GPIO_STATES = 0x83;
         static const uint8_t SUBCMD_BUTTON_QUERY_PCA9555_STATES = 0x84;
         static const uint8_t SUBCMD_BUTTON_QUERY_74HC165_STATES = 0x85;
+        static const uint8_t SUBCMD_BUTTON_QUERY_EVENT_LOG = 0xA0;
+        static const uint8_t SUBCMD_BUTTON_CLEAR_EVENT_LOG = 0xA1;
 
         // Feedback output device tests.  This command invokes
         // subcommands for testing the feedback devices.  The first byte
@@ -773,7 +945,7 @@ namespace PinscapePico
         //   arguments (after the subcommand byte) gives the logical
         //   port number (using the nominal numbering, starting at
         //   port #1), and the third byte gives the PWM level to set.
-        //   This is equivalent to exercsing the port through DOF or
+        //   This is equivalent to exercising the port through DOF or
         //   other programs that access the Feedback Controller HID
         //   interface.  Logical port levels have no effect when test
         //   mode is engaged, because test mode disconnects the physical
@@ -819,6 +991,14 @@ namespace PinscapePico
         //   milliseconds if it's not disconnected via test mode.
         //   Arguments are in args.outputDevPort.
         //
+        // SUBCMD_OUTPUT_PWMWORKER_RESET
+        // SUBCMD_OUTPUT_PWMWORKER_BOOTLOADER
+        //   Resets a PWMWorker Pico.  The _RESET command performs a CPU
+        //   reset, restarting the firmware; the _BOOTLOADER command puts
+        //   the Pico in Boot Loader mode.  The unit is selected by the
+        //   second byte of the arguments (following the subcommand code),
+        //   as an index into the 'workerPico' configuration array.
+        //
         // SUBCMD_OUTPUT_QUERY_LOGICAL_PORTS
         //   Retrieve a list of the logical output ports, which represent
         //   the ports visible to the host through the Feedback Controller
@@ -826,8 +1006,25 @@ namespace PinscapePico
         //   other simulator programs that use the ports to trigger feedback
         //   effects.  The extra transfer data on return contains an
         //   OutputPortList struct, which acts as a list header.  This is
-        //   followed in the same transferby an array of OutputPortDesc
+        //   followed in the same transfer by an array of OutputPortDesc
         //   structs that describe the individual logical output ports.
+        //
+        // SUBCMD_OUTPUT_QUERY_LOGICAL_PORT_NAME
+        //   Retrieves the name of a logical port, if any.  The second
+        //   byte of the request arguments (after the subcommand byte)
+        //   specifies a logical port number.  On reply, the extra transfer
+        //   data contains the name of the port as a null-terminated string
+        //   of single-byte characters.  A port with no name returns an
+        //   empty string.
+        //
+        //   The port names are deliberately returned in a separate request
+        //   from QUERY_LOGICAL_PORTS, with only a single port per request,
+        //   to allow for arbitrarily long port names.  The extra transfer
+        //   data size is limited, so returning all port names in one
+        //   request would impose a limit on the aggregate name lengths.
+        //   Returning one per request avoids this.  A client can avoid
+        //   asking for names for unnamed ports by checking the port name
+        //   flag in the QUERY_LOGICAL_PORTS descriptor.
         //
         // SUBCMD_OUTPUT_QUERY_DEVICES
         //   Retrieve a list of the output controller devices.  These are
@@ -856,7 +1053,7 @@ namespace PinscapePico
         //   most of the device types.  However, a few devices do have
         //   configurable ports.  The Pico GPIO ports can be configured
         //   individually as inputs, digital outputs, or PWM outputs;
-        //   PCA9555 ports can be configured as inputs or digial outs.
+        //   PCA9555 ports can be configured as inputs or digital outs.
         //   The host might wish to know about those port-by-port
         //   configuration differences in some cases.
         //
@@ -878,11 +1075,14 @@ namespace PinscapePico
         static const uint8_t SUBCMD_OUTPUT_SET_PORT = 0x01;
         static const uint8_t SUBCMD_OUTPUT_TEST_MODE = 0x02;
         static const uint8_t SUBCMD_OUTPUT_SET_DEVICE_PORT = 0x03;
+        static const uint8_t SUBCMD_OUTPUT_PWMWORKER_RESET = 0x70;
+        static const uint8_t SUBCMD_OUTPUT_PWMWORKER_BOOTLOADER = 0x71;
         static const uint8_t SUBCMD_OUTPUT_QUERY_LOGICAL_PORTS = 0x81;
         static const uint8_t SUBCMD_OUTPUT_QUERY_DEVICES = 0x82;
         static const uint8_t SUBCMD_OUTPUT_QUERY_DEVICE_PORTS = 0x83;
         static const uint8_t SUBCMD_OUTPUT_QUERY_LOGICAL_PORT_LEVELS = 0x84;
         static const uint8_t SUBCMD_OUTPUT_QUERY_DEVICE_PORT_LEVELS = 0x85;
+        static const uint8_t SUBCMD_OUTPUT_QUERY_LOGICAL_PORT_NAME = 0x86;
 
         // Ping.  This can be used to test that the connection is working
         // and the device is responsive.  This takes no arguments, and
@@ -894,7 +1094,7 @@ namespace PinscapePico
         static const uint8_t CMD_QUERY_GPIO_CONFIG = 0x13;
 
         // Query the IR receiver.  The first byte of the arguments is
-        // a sub-command code giving the speicifc query request:
+        // a sub-command code giving the specific query request:
         //
         // SUBCMD_QUERY_IR_CMD
         //   Query decoded IR commands.  The reply transfer data starts
@@ -925,6 +1125,81 @@ namespace PinscapePico
         static const uint8_t SUBCMD_QUERY_IR_CMD = 0x01;
         static const uint8_t SUBCMD_QUERY_IR_RAW = 0x02;
 
+        // Synchronize clocks between the Pico and the host system.  This
+        // uses the USB SOF (Start-of-frame) signal as a shared time
+        // reference point to determine the correspondence between the
+        // Pico's internal microsecond clock and the host clock time, so
+        // that each system can translate between its local clock and the
+        // other system's clock.
+        //
+        // IMPORTANT: Clock synchronization must be enabled before first
+        // use, by invoking this command with 0xFFFF in the frame number
+        // field.  The USB frame tracking required for this work adds some
+        // slight run-time overhead, so it's disabled by default.  You can
+        // later disable it again by invoking the command with 0xFFFE in the
+        // frame number field.
+        //
+        // Even though this command is called "synchronize clocks", it
+        // doesn't actually change the clock on either system.  It simply
+        // provides both systems with a shared time reference point that
+        // they can use to translate absolute event times from one system's
+        // clock to the other.  We take it for granted that each system has
+        // a high-precision clock that measures time in terms of TIME UNITS
+        // SINCE AN EPOCH, where the epoch is an arbitrary fixed zero point.
+        // For the Pico, the epoch is the last CPU reset time.  To compare
+        // times on the two systems, then, we need to know the difference in
+        // time between the two epochs (Pico epoch and host epoch) on some
+        // THIRD clock, which we can refer to as "real time" or "wall clock
+        // time".  This interval between the two epochs is the TIME OFFSET
+        // between the two clocks, and that's what this command is all
+        // about.
+        //
+        // To use this command, the host must be able to access the USB
+        // adapter hardware on the port physically connected to the Pico, to
+        // obtain the current USB hardware frame counter and the host system
+        // timestamp for the start of the current USB frame.  On Windows,
+        // this can be obtained from WinUsb_GetCurrentFrameNumberAndQpc().
+        //
+        // The USB adapter hardware on the host maintains a 10-bit frame
+        // counter.  At precise 1ms intervals, the adapter increments the
+        // frame counter and sends a special packet known as SOF (Start of
+        // Frame) to the device.  The SOF packet contains the host frame
+        // number, and both host and device mark the time on their
+        // respective system clocks when this packet is sent/received, so
+        // the SOF serves as a shared reference point that marks a fixed
+        // point in time.  In other words, the time marked on the Pico clock
+        // at SOF represents the same instant on an external third-party
+        // clock as the time marked at SOF on the Windows clock.  The two
+        // systems can then use this point as a shared "zero" point for
+        // calculating relatives times to other events.
+        //
+        // The caller populates args.timeSync in the request arguments.
+        // This provides the Pico with the current USB frame number, and the
+        // SOF timestamp on the HOST clock for the start of that frame.
+        // It's critical for the host to use a very recent frame, preferably
+        // the current frame, as the reference point.  The frame counter is
+        // a 10-bit field that's incremented every 1ms, so it rolls over
+        // every 1.024 seconds.  The Pico has no way to determine if a
+        // rollover has occurred, so the transaction must be concluded
+        // within one second of the host setting up the parameters.  This is
+        // trivially accomplished provided the host captures the USB
+        // hardware information immediately before sending the request.
+        //
+        // On return, the Pico populates args.timeSync in the reply
+        // arguments to pass back the Pico clock time that corresponds to
+        // the start of the same frame.  This allows the host to calculate
+        // the offset between the two clocks, which in turn allows the host
+        // to calculate the Pico timestamp for any event given the host
+        // timestamp.
+        //
+        // A synchronization reference point is only good for a few minutes,
+        // because the Pico and Windows system clocks will drift apart over
+        // time.  The Pico clock in particular isn't very accurate; it's
+        // rated accuracy is 30 ppm, which translates to 2.5 seconds of
+        // drift per day.  If you're using clock synchronization for
+        // measurements at a millisecond scale, you should refresh the
+        // offset calculation about once a minute.
+        static const uint8_t CMD_SYNC_CLOCKS = 0x15;
 
         // Length of the arguments union data, in bytes.  This is the number
         // of bytes of data in the arguments union that are actually used.
@@ -952,7 +1227,7 @@ namespace PinscapePico
             // raw byte view of the argument data
             uint8_t argBytes[16];
 
-            // Configuration data descriptor, for CMD_PUT_CONFIG and CMD_GET_CONFIG
+            // Configuration data descriptor, for CMD_CONFIG with SUBCMD_CONFIG_PUT, SMBCMD_CONFIG_GET
             struct __PackedBegin Config
             {
                 uint8_t subcmd;      // subcommand code - a SUBCMD_CONFIG_xxx constant
@@ -1021,7 +1296,7 @@ namespace PinscapePico
                 uint8_t enable;      // 1 = enable test mode, 0 = resume normal operation
                 uint16_t reserved0;  // reserved/padding
                 
-                // Timeout in millseconds; used only when enabling the mode (enable == 1).
+                // Timeout in milliseconds; used only when enabling the mode (enable == 1).
                 // Normal operation resumes after the timeout expires.  0 enables the
                 // mode indefinitely, until explicitly disabled with another command.
                 uint32_t timeout_ms;
@@ -1049,11 +1324,13 @@ namespace PinscapePico
 
                 // PWM level to set.  This uses the physical device's PWM scale:
                 //
-                //  Pico GPIO:  0-255
+                //  Pico GPIO:  0-1 (digital mode), 0-255
+                //  PWMWorker:  0-255
                 //  TLC59116:   0-255
                 //  TLC5940:    0-4095
+                //  TLC5947:    0-4095
                 //  PCA9685:    0-4095
-                //  74HC595:    0-1
+                //  74HC595:    0-1 (digital mode), 0-255 (PWM mode)
                 //  PCA9555:    0-1
                 //
                 // Anything above the maximum level for the device will be clipped to
@@ -1061,6 +1338,28 @@ namespace PinscapePico
                 uint16_t pwmLevel;
 
             } __PackedEnd outputDevPort;
+
+            // CMD_SYNC_CLOCKS request arguments
+            struct __PackedBegin TimeSync
+            {
+                // Host clock time recorded at SOF for the frame number in
+                // usbFrameNumber.  This is expressed in microseconds from
+                // an arbitrary (host-defined) zero point.
+                uint64_t hostClockAtSof;
+
+                // USB hardware frame number corresponding to the SOF time
+                // in hostClockAtSof.  This is a 10-bit number that must be
+                // obtained from the host USB adapter on the host port where
+                // the Pico is connected.
+                //
+                // Special values:
+                //   0xFFFF    Enable frame tracking (required before first sync call)
+                //   0xFFFE    Disable frame tracking
+                uint16_t usbFrameNumber;
+                const static uint16_t ENABLE_FRAME_TRACKING = 0xFFFF;
+                const static uint16_t DISABLE_FRAME_TRACKING = 0xFFFE;
+                
+            } __PackedEnd timeSync;
         } args;
     } __PackedEnd;
 
@@ -1161,6 +1460,11 @@ namespace PinscapePico
         // file (or other object type, depending on context) not found
         static const uint16_t ERR_NOT_FOUND = 16;
 
+        // Retry OK.  This is returned from CMD_CONFIG + SUBCMD_CONFIG_PUT
+        // when the host resends a page that we've already seen and
+        // successfully stored.
+        static const uint16_t ERR_RETRY_OK = 17;
+
         // Transfer length.  If the response requires additional data to
         // be sent device-to-host, this indicates the length of the data,
         // which the device sends as another packet immediately following
@@ -1193,16 +1497,17 @@ namespace PinscapePico
             // ID numbers, for CMD_QUERY_IDS
             struct __PackedBegin ID
             {
+                uint8_t hwid[8];            // the Pico's native hardware ID; permanent and universally unique per device
+                uint16_t cpuType;           // CPU type (2040 -> RP2040, 2350 -> RP2350)
+                uint8_t cpuVersion;         // CPU version (RP2040: 1 -> B0/B1, 2 -> B2)
+                uint8_t romVersion;         // Pico ROM version (1 -> B0, 2 -> B1, 3 -> B2)
                 uint8_t unitNum;            // unit number, assigned in the JSON config; identifies the unit to DOF
-                uint8_t hwid[8];            // the Pico's hative hardware ID; permanent and universally unique per device
-                uint8_t cpuVersion;         // Pico RP2040 CPU version (1 for B0/B1, 2 for B2)
-                uint8_t romVersion;         // Pico ROM version (1 for B0, 2 for B1, 3 for B2)
                 uint8_t xinputPlayerIndex;  // player index for the XInput interface; 0xFF if unknown/inactive
                 uint16_t ledWizUnitMask;    // LedWiz emulation unit mask; the low-order bit enables unit #1, next bit enables unit #2, etc
             } __PackedEnd id;
 
             // Checksum, for CMD_CONFIG + SUBCMD_CONFIG_TEST_CHECKSUM.
-            // This proivdes the computed checksum value of the stored
+            // This provides the computed checksum value of the stored
             // config file data.
             uint32_t checksum;
 
@@ -1259,6 +1564,15 @@ namespace PinscapePico
                 uint8_t irCommandCount;
                 
             } __PackedEnd tvon;
+
+            // CMD_SYNC_CLOCKS reply arguments
+            struct __PackedBegin TimeSync
+            {
+                // Pico clock time corresponding the SOF for the USB
+                // frame number provided with the request.
+                uint64_t picoClockAtSof;
+
+            } __PackedEnd timeSync;
         } args;
     } __PackedEnd;
 
@@ -1277,10 +1591,17 @@ namespace PinscapePico
         uint16_t reserved0;      // reserved/padding
         uint32_t reserved1;      // reserved/padding
         uint64_t upTime;         // time since reboot, in microseconds
+
         uint64_t nLoops;         // number of iterations through main loop since stats reset
         uint64_t nLoopsEver;     // number of main loop iterations since startup
         uint32_t avgLoopTime;    // average main loop time, microseconds
         uint32_t maxLoopTime;    // maximum main loop time, microseconds
+        
+        uint64_t nLoops2;        // number of iterations through secondary core main loop since stats reset
+        uint64_t nLoopsEver2;    // number of secondary core main loop iterations since startup
+        uint32_t avgLoopTime2;   // average secondary core main loop time, microseconds
+        uint32_t maxLoopTime2;   // maximum secondary core main loop time, microseconds
+        
         uint32_t heapSize;       // total heap size
         uint32_t heapUnused;     // heap space not in use
         uint32_t arenaSize;      // arena size
@@ -1546,7 +1867,7 @@ namespace PinscapePico
         // simulators.
         uint32_t calMin;         // calibration minimum
         uint32_t calZero;        // calibration zero point
-        uint32_t calMax;         // caliobration maximum
+        uint32_t calMax;         // calibration maximum
 
         // Sensor-specific calibration data.  This is an opaque block
         // of data for the sensor's use.  It's reported here so that the
@@ -1686,7 +2007,7 @@ namespace PinscapePico
     // sensor data.  It's NOT possible for software on the PC host side to
     // accurately track the firing motion because the USB HID connection is
     // too slow - it can't accurately measure the speed from the position
-    // reports alone because they're not frequent enough to caputre this
+    // reports alone because they're not frequent enough to capture this
     // high-speed motion.  The firing event tracking on the device side allows
     // the device to manipulate the Z Axis HID position reports in such a way
     // that a simulator on the PC can accurately reconstruct the release
@@ -1717,7 +2038,7 @@ namespace PinscapePico
         // lasts for a timed interval before advancing to the Settling state.
         Fired = 2,
 
-        // After a firing event, the firwmare enters this state to wait for
+        // After a firing event, the firmware enters this state to wait for
         // the mechanical plunger to stop bouncing.  The plunger usually
         // bounces very rapidly after hitting the front spring, which lasts
         // for a second or two until the motion dies down and the plunger
@@ -1757,7 +2078,7 @@ namespace PinscapePico
         // from rescaling.
         uint32_t nativeScale;
 
-        // Flags (no flags curently defined)
+        // Flags (no flags currently defined)
         uint32_t flags;
     } __PackedEnd;
 
@@ -1833,7 +2154,7 @@ namespace PinscapePico
         static const uint8_t SRC_IR = 0x08;        // IR remote receiver input (triggers on receiving a programmed IR command)
         static const uint8_t SRC_CLOCK = 0x09;     // time-of-day trigger
         static const uint8_t SRC_OUTPORT = 0x0A;   // output port trigger (DOF port); button is ON when the DOF port PWM level in a specified range
-        static const uint8_t SRC_NULL = 0x0B;      // nujll source; always reads as off
+        static const uint8_t SRC_NULL = 0x0B;      // null source; always reads as off
 
         // Source device details.  These elements vary by source type:
         //
@@ -1889,14 +2210,14 @@ namespace PinscapePico
         //   4=Start, 5=Back, 6=L3, 7=R3, 8=LB, 9=RB, 10=XBOX, 12=A, 13=B, 14=X, 15=Y
         //
         // - Open Pinball Device: 1..32 = generic button; 33-65 = pinball button,
-        //   using the index in the spec + 33; 100 = lower left flipper, 101 =lower
-        //   right flipper, 102 = upper left flipper, 103 = upper right flipper
+        //   using the index in the spec + 33
         //
         // Unused for other action types.
         uint8_t actionDetail;
 
-        // reserved/padding
-        uint8_t reserved0;
+        // flags - a bitwise combination of FLAG_xxx bits
+        uint8_t flags;
+        static const uint8_t FLAG_EVENTLOG = 0x01;   // event logging is enabled for this button
 
         // Shift mask and shift bits.  The mask selects which shift bits affect
         // the button, and the shift bits set the state that has to match.  For
@@ -1930,10 +2251,57 @@ namespace PinscapePico
         uint32_t addr;
     } __PackedEnd;
 
-    // Logical Output port list, for CMD_OUTPUTS + SUBCMD_OUTPUT_QUERY_PORTS.
-    // The reply transfer data starts with an OutputPortList struct as a list
-    // header.  This is followed in the transfer by zero or more OutputPortDesc
-    // structs describing the individual ports.
+    // Button event log, for CMD_BUTTONS + SUBCMD_BUTTON_QUERY_EVENT_LOG.
+    // This struct is the header for the event list; it's followed by zero
+    // or more ButtonEventLogItem structs, as a packed array.  The event
+    // log item list represents the history of rising-edge and falling-edge
+    // interrupts received on the GPIO, with a timestamp for each event.
+    // An edge corresponds to a physical press or release of the button.
+    struct __PackedBegin ButtonEventLog
+    {
+        // size of this struct
+        uint16_t cb;
+
+        // number of ButtonEventLogItem structs that follow
+        uint16_t numItems;
+
+        // size of the ButtonEventLogItem struct
+        uint16_t cbItem;
+
+        // reserved/padding
+        uint16_t reserved0;
+    } __PackedEnd;
+
+    // Button event log item.  Zero or more of these structs follow
+    // a ButtonEventLog header struct in response to a CMD_BUTTONS +
+    // SUBCMD_BUTTON_QUERY_EVENT_LOG request.
+    struct __PackedBegin ButtonEventLogItem
+    {
+        // Time of the button press, in microseconds since the last Pico CPU reset
+        uint64_t t;
+
+        // Event type.  Note that the PRESS and RELEASE events represent the
+        // state of the button, NOT the raw voltage level.  The button logic
+        // takes the active high/low configuration into account and just
+        // reports the abstract button state, so callers don't have to worry
+        // about the wiring polarity.
+        uint8_t eventType;
+        static const uint8_t EVENTTYPE_RELEASE = 0;   // button was released (switching from on to off)
+        static const uint8_t EVENTTYPE_PRESS = 1;     // button was pressed (switching from off to on)
+
+        // reserved/padding
+        uint8_t reserved0[7];
+    } __PackedEnd;
+
+    // Logical Output port list, for CMD_OUTPUTS + SUBCMD_OUTPUT_QUERY_LOGICAL_PORTS.
+    // The reply transfer data starts with an OutputPortList struct, which
+    // serves as a list header.  This is followed in the transfer by zero or
+    // more OutputPortDesc structs describing the individual ports.  The overall
+    // report buffer looks like so:
+    //
+    //    OutputPortList             struct, OutputPortList::cb bytes
+    //    OutputPortDesc[]           array of struct, OutputPortList::numDescs elements x OutputPortList::cbDesc bytes
+    //
     struct __PackedBegin OutputPortList
     {
         // size in bytes of the OutputPortList struct
@@ -1958,6 +2326,7 @@ namespace PinscapePico
         static const uint8_t F_INVERTED     = 0x04;   // use inverted logic for the port
         static const uint8_t F_FLIPPERLOGIC = 0x08;   // flipper/chime logic enabled for the port
         static const uint8_t F_COMPUTED     = 0x10;   // the port has a computed data source instead of direct host control
+        static const uint8_t F_NAMED        = 0x20;   // the port has a user-assigned name string
 
         // Device identification.  For all of the physical device types, this is the
         // configuration index of the chip.  Unused for other types.
@@ -1973,10 +2342,12 @@ namespace PinscapePico
         static const uint8_t DEV_PCA9555 = 6;     // PCA9555 I2C GPIO extender port
         static const uint8_t DEV_74HC595 = 7;     // 74HC595 shift register port
         static const uint8_t DEV_ZBLAUNCH = 8;    // ZB Launch virtual port
+        static const uint8_t DEV_PWMWORKER = 9;   // external Pico running PWMWorker firmware
+        static const uint8_t DEV_TLC5947 = 10;    // TLC5947 serial-interface PWM controller port
 
         // Device port.  For GPIO ports, this is the nominal Pico GP number of the
         // assigned port.  For all of the other physical devices, it's the nominal port
-        // number on the chip, using the chip's data sheet labeling for the output pions.
+        // number on the chip, using the chip's data sheet labeling for the output pins.
         // Most of these chips use pin labeling of the form OUTPUT0..N, LED0..N, or
         // something similar.  The port number we use here corresponds to the numeric
         // suffix, so (for example) OUTPUT7 on a TLC59116 would be represented here by
@@ -2008,8 +2379,8 @@ namespace PinscapePico
     struct __PackedBegin OutputDevDesc
     {
         // Address.  For I2C chips (TLC59116, PCA9685), this is ((bus << 8) | addr),
-        // where 'bus' is 0 or 1 for I2C0 or I2C1 (the Pico I2C unit that the device
-        // is connected to) and 'addr' is the chip's 7-bit I2C address.  Unused for
+        // where bus is 0 or 1 for I2C0 or I2C1 (the Pico I2C unit that the device
+        // is connected to) and addr is the chip's 7-bit I2C address.  Unused for
         // other device types.
         uint32_t addr;
 
@@ -2020,16 +2391,17 @@ namespace PinscapePico
         // inferred from (numPorts / numPortsPerChip).
         uint16_t numPorts;
 
-        // Number of output ports PER CHIP.  For daisy chains (74HC595, TLC5940),
-        // this is the number of chips on each physical chip in the chain.  For
-        // individually configured chips, this is the same as numPorts.
+        // Number of output ports PER CHIP.  For daisy chains (74HC595, TLC5940,
+        // TLC5947), this is the number of chips on each physical chip in the
+        // chain.  For individually configured chips, this is the same as
+        // numPorts.
         uint16_t numPortsPerChip;
 
         // PWM resolution.  This is the number of discrete PWM duty cycle steps that the
         // device supports.  The range of PWM levels is 0 to pwmRes-1.  A digital on/off
         // output port (Pico GPIO in digital mode, shift register port, PCA9555 port)
         // reports 2 here.  An 8-bit PWM chip (TLC59116) reports 256; a 12-bit chip
-        // (TLC5940, PCA9685) reports 4096.
+        // (TLC5940, TLC5947, PCA9685) reports 4096.
         uint16_t pwmRes;
 
         // Device configuration index
@@ -2167,32 +2539,32 @@ namespace PinscapePico
         // the Pico's on-board flash chip.  The reference Pico manufactured
         // by Raspberry Pi has a 2MB chip installed, but the RP2040 CPU can
         // accommodate capacities up to 16MB, and there are existing third-
-        // party clones with larger sizes than the standard 2MB.
+        // party clones with larger sizes than the standard 2MB, as well as
+        // devices with no on-board flash at all.
         //
         // This field contains reliable information if F_FLASH_SIZE_KNOWN is
         // set in the flags.  If that flag is NOT set, this field contains a
         // default size of 2MB, which is the size of the flash part used in
         // the reference Pico manufactured by Raspberry Pi.  I think it's
-        // safe to assume that all Picos have *at least* 2MB of flash
-        // installed, so the value here should be a safe lower bound even if
-        // F_FLASH_SIZE_KNOWN isn't set.  The reason for the uncertainty is
-        // that the flash chip is external to the Pico's RP2040 CPU, and by
-        // design is allowed to vary in size up to 16MB.  The CPU has no
+        // safe to assume that all Picos that have any flash installed have
+        // at least 2MB, so the value here should be a safe lower bound even
+        // if F_FLASH_SIZE_KNOWN isn't set.  The reason for the uncertainty
+        // is that the flash chip is external to the Pico's RP2040 CPU, and
+        // by design is allowed to vary in size up to 16MB.  The CPU has no
         // direct knowledge of the installed flash size as a result.  The
         // firmware attempts to determine the flash size by interrogating
         // some industry-standard SPI register locations (known as SFDP)
         // that most newer flash chips implement per the standards.  If
         // these registers are properly implemented, the firmware can
         // reliably determine the actual flash size.  The reference Pico's
-        // flash chip does implement the registers, and I fully expect that
-        // most clones use chips that also implement the registers.  But
-        // there's no guarantee that every flash chip used by every clone
-        // adheres to the standards, so we provide this flag, in case any
-        // host software needs to distinguish a definitely known flash size
-        // from a default guess.  There might be cases, for exmaple, where
-        // it's safer to use the *maximum* Pico flash size of 16MB when the
-        // actual size is unknown, or when it would be better to ask the
-        // user to weigh in, such as when exporting a full backup image.
+        // flash chip implements the registers, but there's no guarantee
+        // that every clone does, so we provide this flag, in case the host
+        // software needs to distinguish a definitely known flash size
+        // from a default guess.  There might be cases, for example, where
+        // it's safer to use the maximum Pico flash size of 16MB when the
+        // actual size is unknown, or when it would be better to require
+        // the user to specify the size, such as when exporting a full
+        // backup image.
         uint32_t flashSizeBytes;
 
         // Flags
@@ -2214,7 +2586,7 @@ namespace PinscapePico
         // size of the IRCommandListEle struct
         uint16_t cbEle;
 
-        // nubmer of IRCommandEle structs that follow the IRCommandList header
+        // number of IRCommandEle structs that follow the IRCommandList header
         uint16_t numEle;
 
         // reserved/padding
@@ -2225,8 +2597,8 @@ namespace PinscapePico
     {
         uint64_t dt;         // elapsed time since previous command received, in microseconds
         
-        uint64_t cmd;        // command code     } These use the Pinscape univeral IR command
-        uint8_t protocol;    // protocol ID      } format.  See IRRemote/IRcommand.h.
+        uint64_t cmd;        // command code     } These use the Pinscape universal IR command
+        uint8_t protocol;    // protocol ID      } format.  See IRRemote/IRCommand.h.
         
         uint8_t proFlags;    // protocol flags
         static const uint8_t FPRO_DITTOS = 0x02;    // protocol supports dittos
@@ -2369,6 +2741,11 @@ namespace PinscapePico
         // time a sufficient period of stillness occurs.
         uint16_t autoCenterInterval;
 
+        // auto-center thresholds, in normalized INT16 axis units
+        uint16_t xThresholdAutoCenter;
+        uint16_t yThresholdAutoCenter;
+        uint16_t zThresholdAutoCenter;
+
         // DC filter adaptation time constant, in milliseconds.  This is the
         // approximate settling time to cancel out a change in the DC level,
         // which is the gravity component of any fixed tilt in the
@@ -2389,7 +2766,7 @@ namespace PinscapePico
         // window, the window is moved just far enough to enclose the new
         // reading.  The window size should be set to around the average
         // noise level observed when the device is at rest, since that's the
-        // main type of noise we're trying to eliminate wiht the filter.
+        // main type of noise we're trying to eliminate with the filter.
         uint16_t xJitterWindow;
         uint16_t yJitterWindow;
         uint16_t zJitterWindow;

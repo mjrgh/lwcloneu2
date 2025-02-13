@@ -1,5 +1,5 @@
 // Pinscape Pico Device interface
-// Copyright 2024 Michael J Roberts / BSD-3-Clause license / NO WARRANTY
+// Copyright 2024 Michael J Roberts / BSD-3-Clause license, 2025 / NO WARRANTY
 //
 // This module implements an API for interacting with the Pinscape
 // Pico device via its USB control interfaces.  The API is designed
@@ -119,14 +119,42 @@ namespace PinscapePico
 		// across firmware updates, USB port changes, etc.
 		PicoHardwareId hwid;
 
-		// Pico RP2040 CPU version
+		// CPU type: 2040 -> RP2040, 2350 -> RP2350
+		uint16_t cpuType = 0;
+
+		// CPU version
 		uint8_t cpuVersion = 0;
 
-		// Pico RP2040 ROM version
+		// ROM version
 		uint8_t romVersion = 0;
 
-		// ROM version name, per the nomenclature used in the SDK
+		// ROM version name, per the nomenclature used in the Pico SDK
 		std::string romVersionName;
+
+		// Pico SDK version string.  This gives the version of the
+		// SDK used to build the firmware.  The firmware just passes
+		// through the version string defined by the SDK headers, so
+		// the format might vary at the whim of the Raspberry Pi
+		// developers, but it's likely that this will always use the
+		// stereotypical X.Y.Z (major.minor.patch) format favored by
+		// software developers everywhere.
+		std::string picoSDKVersion;
+
+		// Tinyusb library version string.  Tinyusb is the official
+		// USB API of the Pico SDK, but is a separate code base that's
+		// versioned independently, so the Pico SDK version doesn't
+		// necessary imply a particular Tinyusb version, thus the
+		// need for separate version identification here.  This uses
+		// the typical X.Y.Z format.
+		std::string tinyusbVersion;
+
+		// Compiler version string, in the form "CompilerName X.Y.Z".
+		// This is the name and version of the compiler used to build
+		// the firmware, which might be useful for diagnostics and
+		// troubleshooting, to determine the provenance of a particular
+		// build.  The current SDK toolchain is based on the GNU tools,
+		// with compiler name GNUC.
+		std::string compilerVersion;
 
 		// Pinscape Pico Unit Number.  This is a small integer that
 		// identifies the device locally, to distinguish it from
@@ -197,6 +225,28 @@ namespace PinscapePico
 		// help the user keep track of which device is which when
 		// multiple Pinscape Pico units are present.
 		std::string unitName;
+
+		// Build-target board name.  This is the internal symbol
+		// used in the Pico SDK to identify the target board for
+		// the firmware build.  This is only the TARGET board,
+		// meaning the board that the firmware was configured for
+		// during compilation.  This doesn't necessarily reflect
+		// the "live" board type that the software is actually
+		// running on, since there might be compatible clones for
+		// any given board type that will successfully run code
+		// that was nominally configured for another board.  For
+		// example, this won't distinguish you whether the firmware
+		// is running on an original Pico from Raspberry Pi or one
+		// of the compatible clones made by Adafruit or Sparkfun.
+		std::string targetBoardName;
+
+		// Get a friendly version of the board name for display
+		// purposes.  The board name in targetBoardName is an
+		// internal identifier used in the SDK, designed for use
+		// by the build software, so it's not necessarily in a
+		// human-friendly display format.  This reformats the
+		// name to make it friendlier for display.
+		std::string FriendlyBoardName() const;
 	};
 
 	// Vendor Interface descriptor object.  The device enumerator returns a 
@@ -205,9 +255,9 @@ namespace PinscapePico
 	class VendorInterface;
 	class VendorInterfaceDesc
 	{
-		// Note that the constructor is private, for use by the enumerator
-		// in the base class.  We let the enumerator access it by making the
-		// parent class a friend, and we let std::list's emplace() access it
+		// Note that the vendor interface constructor is private, for use by 
+		// the enumerator.  We let the enumerator access it by making the
+		// vendor class a friend, and we let std::list's emplace() access it
 		// via the private ctor key type that only friends can use.
 		friend class VendorInterface;
 		struct private_ctor_key_t {};
@@ -226,33 +276,22 @@ namespace PinscapePico
 		const WCHAR *DeviceInstanceId() const { return deviceInstanceId.c_str(); }
 
 		// Find the CDC (virtual COM) port associated with this device.
-		// Pinscape Pico can be configured to expose a CDC port that can
-		// be used to access log messages and command console functions
-		// via a terminal window.  The CDC port appears in Windows as a
-		// virtual COMn port.  The COMn port number can't be configured
-		// by the user, since it's assigned automatically by Windows when
-		// the device first connects.  This function lets you identify
-		// that system-assigned port number given a device path.
+		// The device sets up a CDC port for logging and command console
+		// access.  Windows assigns the COM port number, and the device
+		// itself has no way to control or query the port number, so we
+		// provide this method to help applications find the associated
+		// port number.
 		// 
-		// If the device exposes a CDC port, this fills in 'name' with
-		// the COMn port name string and returns true.  If no CDC port
-		// is found (or any error occurs), the function returns false.
-		//
-		// The COM port name returned is of the form "COMn", where n
-		// is a number.  This is the format that most user interfaces
-		// use to display available ports and accept as input to
-		// select a port.  You can also use this name in many Windows
-		// system calls involving COM ports, either directly as the
-		// string or by extracting the number suffix.  Note that the
-		// number might be more than one digit, since it's possible
-		// to add quite a lot of virtual COM ports.  For CreateFile(),
-		// prepend the string "\\\\.\\" to the name returned.
+		// The COM port is returned as a "COMn" string that can be used
+		// in many Windows system calls accepting COM port device names.
+		// For CreateFile(), prepend "\\\\.\\" to the COMn string to
+		// form the device path.
 		bool GetCDCPort(TSTRING &name) const;
 
 		// Open the path to get a live handle to a device
-		HRESULT Open(VendorInterface* &device);
-		HRESULT Open(std::unique_ptr<VendorInterface> &device);
-		HRESULT Open(std::shared_ptr<VendorInterface> &device);
+		HRESULT Open(VendorInterface* &device) const;
+		HRESULT Open(std::unique_ptr<VendorInterface> &device) const;
+		HRESULT Open(std::shared_ptr<VendorInterface> &device) const;
 
 		// Get the VID/PID for the device
 		HRESULT GetVIDPID(uint16_t &vid, uint16_t &pid);

@@ -112,7 +112,7 @@ typedef struct LWZDEVICELIST
 #define LWZ_DEVICE_TYPE_NONE           0     // no device present
 #define LWZ_DEVICE_TYPE_LEDWIZ         1     // LedWiz or unknown emulator
 #define LWZ_DEVICE_TYPE_LWCLONEU2      2     // LwCloneU2
-#define LWZ_DEVICE_TYPE_PINSCAPE       3     // Pinscape Controller
+#define LWZ_DEVICE_TYPE_PINSCAPE       3     // Pinscape Controller KL25Z
 #define LWZ_DEVICE_TYPE_PINSCAPE_VIRT  4     // Pinscape Controller virtual LedWiz for ports beyond 32
 #define LWZ_DEVICE_TYPE_ZB             5     // ZB Output Control (zebsboards.com)
 #define LWZ_DEVICE_TYPE_PINSCAPE_PICO  6     // Pinscape Pico virtual LedWiz
