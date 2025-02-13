@@ -48,33 +48,34 @@ never updated to use DOF.
 
 For several reasons:
 
-* Open source.  This replacement DLL is open-source, so you're free
-to fix bugs and make improvements.  The manufacturer's DLL is
-proprietary closed-source.
-
 * Multi-threading.  This DLL does its USB I/O on a background
 thread, so that it never stalls the calling program waiting for
 the USB transaction to complete.  The original manufacturer's DLL
 uses blocking I/O, which forces the calling program to wait for
-every USB write to complete.  This can cause video stutter and
-UI lag in games like Future Pinball, and it can even stall the
-game for seconds at a time during intense bursts of feedback
-device effect activity, such as when a multiball mode or other
-event triggers a big light show in the game.  This version of the
-DLL never blocks the main thread with USB I/O, allowing the game
-to run smoothly even when heavy USB activity is going on.
+every USB write to complete.  This was especially noticeable in
+Future Pinball when lots of effects fired at once, such as
+the start of a multiball mode, which could make the program
+freeze up for seconds at a time waiting for all of the USB
+commands to complete.  And even during normal play, the USB
+delays could cause an annoying amount of video stutter.  This
+DLL sends all of its USB commands on a background thread, so
+the game keeps running smoothly even when lots of LedWiz effects
+are triggered.
 
-* Better reliability.  This version works around a bug in the original
-LedWiz hardware that causes genuine LedWiz's to glitch when multiple USB
-updates are sent too rapidly.  It also fixes some bugs in the original
-manufacturer's DLL (or, more accurately, never had the bugs in the
-first place) that make the original DLL crash with some software or
-when some other types of devices are present in the system.
+* Better reliability.  This version works around a serious bug in the
+original LedWiz hardware that causes genuine LedWiz's to glitch when
+multiple USB updates are sent too rapidly.  The "glitch" manifests as
+outputs randomly firing, which can be really annoying if the LedWiz is
+driving noisy devices like solenoids.  This version of the DLL also
+corrects some compatibility bugs in the original manufacturer's DLL
+that make the older DLL crash when certain other software is running
+or certain other device types are connected.
 
-* Expanded device support.  The original manufacturer DLL is, naturally,
-tied to the genuine LedWiz hardware.  This version expands support to
-several other devices popular in the virtual pin cab community, including
-Pinscape KL25Z, Pinscape Pico, and Zebsbboards.com's ZB Output Control.
+* Expanded device support.  The original manufacturer DLL is,
+understandably, tied to the genuine LedWiz hardware.  This version
+expands support to several other devices popular in the virtual pin
+cab community, including Pinscape KL25Z, Pinscape Pico, and
+Zebsboards.com's ZB Output Control.
 
 The original motivation for developing the pin cab fork of the DLL was
 for the expanded device support, and that's still the biggest
@@ -87,38 +88,48 @@ makes games run much more smoothly than with the original.
 
 ## Changes vs. the original cithraidt version:
 
-* **Better compatibility with the manufacturer's DLL.**  cihraidt's
-original ledwiz.dll replacement faithfully implements the *documented*
-LedWiz API, but it has some slight differences in its ad hoc behavior
-compared to the manufacturer's version, such as the order of device
-enumeration.  Some third-party pin cab software that uses the LedWiz
-interface happens to be sensitive to some of these details.  Strictly
-speaking, that kind of dependency on unspecified behavior is a bug in
-the third-party software, but the software in question is closed
-source, and the people who wrote it don't care and aren't going to
-fix it, so it's up to us to smooth things over.
-So this version of the DLL emulates some of that known ad hoc behavior
-of the original manufacturer DLL more exactly than cithraidt's base
-version does, making it more widely compatible with more of the buggy
-software that people want to run.
+* **Better compatibility with the manufacturer's DLL.** cihraidt's
+original LedWiz.dll replacement faithfully implements the
+manufacturer's version as far as the official documentation goes, but
+it nonetheless has some slight differences in the actual ad hoc
+behavior, in a few areas that the official documentation leaves
+unspecified.  For example, the order of device enumeration is
+different.  Strictly speaking, cihraidt's version accomplished what it
+set out to do, of emulating the documented API, but as a practical
+matter, some extant third-party pin cab software happens to depend in
+subtle ways on the exact ad hoc behavior of the original DLL, and
+didn't work properly when confronted with cihraidt's version's slight
+differences.  That kind of dependency on undocumented behavior is
+certainly a bug in the third-party software, but the software in
+question is closed source, and the people who wrote it don't care, and
+they're not going to fix it.  So if we want that buggy old software to
+keep working with a replacement DLL, it's up to the new DLL to more
+perfectly replicate the original DLL's behavior.  So this version has
+some fixes for the third-party software dependencies we've encountered
+so far, making it more widely compatible with the commonly used
+virtual pin cab software.
 
 * **LedWiz hardware bug workaround.** The real LedWiz has a serious
 bug in its firmware related to USB message timing that makes it behave
-erratically when the PC sends USB commands too quickly.  When DOF first
-became available, a lot of virtual pin cab users noticed that DOF
-frequently made their LedWiz fire outputs at random.  This was long
-believed to be due to some inherent USB timing limitation, or a bug
-in the Windows USB driver, but after much investigation, it was
+erratically when the PC sends USB commands too quickly.  When DOF
+first became available, a lot of virtual pin cab users noticed that
+DOF frequently made their LedWiz fire outputs at random.  This was
+long believed to be due to some inherent USB timing limitation, or a
+bug in the Windows USB driver, but after much investigation, it was
 definitively traced to a defect in the LedWiz itself, most likely in
 its firmware.  When the LedWiz receives a new command too quickly
 after a prior one, the new command partially overwrites the old
 command in the LedWiz's internal memory, causing random port state
 changes due to the corrupted memory.  To work around the bug, this
-version of the DLL automatically detects when it's talking to a genuine
-LedWiz, and automatically throttles USB traffic to that device to one
-command per 10ms.  The throttling *isn't* applied to clones, since none
-of the clones suffer from the bug.  So the DLL gives you the best of both:
-the real LedWiz won't glitch with this DLL, and other devices run at full speed.
+version of the DLL automatically detects when it's talking to a
+genuine LedWiz, and automatically throttles USB traffic to that device
+to one command per 10ms.  The throttling *isn't* applied to clones,
+since all of the clones work perfectly fine no matter how fast you
+throw commands at them.  So this DLL gives you the optimal handling
+for whatever device you have: for a real LedWiz, it throttles the
+USB traffic to a safe rate where the LedWiz won't glitch, and for
+other devices, it runs commands at full speed, for minimum latency
+carrying out effects.
 
 * **Pinscape Controller compatibility.** The original manufacturer's
 DLL has a defect that makes it crash (due to an internal memory corruption)
@@ -145,10 +156,11 @@ device.  For example, if a Pinscape device is assigned to LedWiz unit #8,
 and has 64 ports, it will appear to software as units #8 and #9.
 Unit #9 represents the physical ports from 33 to 64.  This is
 completely automatic; no configuration is needed to make this happen.
+This applies to the original KL25Z Pinscape and Pinscape Pico.
 
 * **ZB Output Control support.** This version recognizes ZB Output
-Control devices (zebsboards.com), which use a different USB Vendor ID
-(VID) than the original LedWiz.
+Control devices (zebsboards.com), which the original DLL doesn't
+recognize (because the ZB device uses a different VID).
 
 **New LED Tester:** The project also includes **NewLedTester**, a
 Windows GUI program that lets you see attached LedWiz units and
