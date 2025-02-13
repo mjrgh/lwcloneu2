@@ -89,8 +89,8 @@ makes games run much more smoothly than with the original.
 ## Changes vs. the original cithraidt version:
 
 * **Better compatibility with the manufacturer's DLL.** cihraidt's
-original LedWiz.dll replacement faithfully implements the
-manufacturer's version as far as the official documentation goes, but
+original LedWiz.dll replacement faithfully emulates the
+manufacturer's DLL as far as the official documentation goes, but
 it nonetheless has some slight differences in the actual ad hoc
 behavior, in a few areas that the official documentation leaves
 unspecified.  For example, the order of device enumeration is
