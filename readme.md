@@ -121,7 +121,7 @@ its firmware.  When the LedWiz receives a new command too quickly
 after a prior one, the new command partially overwrites the old
 command in the LedWiz's internal memory, causing random port state
 changes due to the corrupted memory.  To work around the bug, this
-version of the DLL automatically detects when it's talking to a
+version of the DLL detects when it's talking to a
 genuine LedWiz, and automatically throttles USB traffic to that device
 to one command per 10ms.  The throttling *isn't* applied to clones,
 since all of the clones work perfectly fine no matter how fast you
@@ -177,6 +177,15 @@ a small test program.
 
 The win32/NewLedTester tree contains its own C# VS solution to build
 that program separately.
+
+## Firmware
+
+For the purposes of this (mjr) fork, we're only interested in the
+Windows DLL.  I haven't made any changes in the Arduino firmware, I
+haven't built it, and I don't include it in the distribution.  If
+your interest is in the firmware, you should refer to cihraidt's
+original repository, since there might be newer versions of the
+firmware since I created this fork.
 
 
 # Original Readme
